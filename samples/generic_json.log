@@ -1,0 +1,10 @@
+{"timestamp": "2026-04-03T10:00:01Z", "method": "GET", "path": "/api/v1/users/100", "status": 200, "ip": "10.1.0.10", "response_time": 42, "authorization": "Bearer tok_abc123"}
+{"timestamp": "2026-04-03T10:00:02Z", "method": "POST", "path": "/api/v1/users", "status": 201, "ip": "10.1.0.11", "response_time": 88, "authorization": "Bearer tok_abc123"}
+{"timestamp": "2026-04-03T10:00:03Z", "method": "GET", "path": "/api/v1/inventory/items", "status": 200, "ip": "10.1.0.12", "response_time": 15}
+{"timestamp": "2026-04-03T10:00:04Z", "method": "PUT", "path": "/api/v1/inventory/items/abc-def-42", "status": 200, "ip": "10.1.0.12", "response_time": 35, "authorization": "ApiKey sk_live_123456"}
+{"timestamp": "2026-04-03T10:00:05Z", "method": "GET", "path": "/api/v1/reports/daily", "status": 200, "ip": "10.1.0.20", "response_time": 1200}
+{"timestamp": "2026-04-03T10:00:06Z", "method": "GET", "path": "/api/v1/reports/weekly", "status": 504, "ip": "10.1.0.20", "response_time": 30000}
+{"timestamp": "2026-04-03T10:00:07Z", "method": "DELETE", "path": "/api/v1/users/200", "status": 401, "ip": "10.1.0.30"}
+{"timestamp": "2026-04-03T10:00:08Z", "method": "GET", "path": "/health", "status": 200, "ip": "10.1.0.1", "response_time": 1}
+{"timestamp": "2026-04-03T10:00:09Z", "method": "POST", "path": "/api/internal/sync", "status": 200, "ip": "10.1.0.5", "response_time": 500}
+{"timestamp": "2026-04-03T10:00:10Z", "method": "GET", "path": "/api/v1/users/300/settings", "status": 200, "ip": "10.1.0.10", "response_time": 22, "authorization": "Bearer tok_xyz789"}
