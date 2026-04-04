@@ -1,0 +1,58 @@
+services:
+  # Web dashboard — always running
+  dashboard:
+    build: .
+    container_name: api-scout-dashboard
+    ports:
+      - "8080:8080"
+    volumes:
+      - api-scout-data:/data
+      - ./logs:/logs:ro
+    restart: unless-stopped
+    command: ["dashboard", "-h", "0.0.0.0", "-p", "8080"]
+
+  # Continuous monitoring — watches logs + periodic scans
+  watcher:
+    build: .
+    container_name: api-scout-watcher
+    volumes:
+      - api-scout-data:/data
+      - ./logs:/logs:ro
+    restart: unless-stopped
+    # Customize these for your environment:
+    #   -l /logs/access.log        → log file(s) to tail
+    #   -s 10.0.0.0/24             → network targets to scan
+    #   --log-interval 30          → seconds between log checks
+    #   --scan-interval 3600       → seconds between network scans
+    command: >
+      watch
+      -l /logs/access.log
+      --log-interval 30
+      --scan-interval 3600
+    profiles:
+      - monitoring
+
+  # One-shot log analysis
+  analyze:
+    build: .
+    container_name: api-scout-analyze
+    volumes:
+      - api-scout-data:/data
+      - ./logs:/logs:ro
+    command: ["analyze", "/logs/access.log"]
+    profiles:
+      - tools
+
+  # One-shot network scan
+  scan:
+    build: .
+    container_name: api-scout-scan
+    volumes:
+      - api-scout-data:/data
+    # Override target via: docker compose run scan scan 192.168.1.0/24
+    command: ["scan", "localhost"]
+    profiles:
+      - tools
+
+volumes:
+  api-scout-data:

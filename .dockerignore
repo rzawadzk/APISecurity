@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+*.db
+*.db-shm
+*.db-wal
+.git/
+.gitignore
+.env
+logs/
