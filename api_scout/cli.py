@@ -428,6 +428,178 @@ def search(ctx, query: str):
     console.print(table)
 
 
+# ── CI/CD Validation ──
+
+
+@main.command()
+@click.argument("spec_file", type=click.Path(exists=True))
+@click.option("--fail-on-breaking/--warn-on-breaking", default=True, help="Fail CI on breaking changes")
+@click.option("--fail-on-shadow/--warn-on-shadow", default=True, help="Fail CI on shadow policy violations")
+@click.option("--output", "-o", type=click.Path(), help="Save results as JSON")
+@click.option("--github-annotations", is_flag=True, help="Output GitHub Actions annotation format")
+@click.pass_context
+def validate(ctx, spec_file: str, fail_on_breaking: bool, fail_on_shadow: bool, output: str, github_annotations: bool):
+    """Validate an OpenAPI spec against the live inventory (CI/CD integration)."""
+    from .cicd import validate_spec_against_inventory, generate_github_annotations
+
+    db = get_db(ctx)
+    result = validate_spec_against_inventory(
+        Path(spec_file), db,
+        fail_on_breaking=fail_on_breaking,
+        fail_on_shadow=fail_on_shadow,
+    )
+
+    if github_annotations:
+        console.print(generate_github_annotations(result))
+    else:
+        # Pretty print
+        status_icon = "[green]PASSED[/]" if result.passed else "[red]FAILED[/]"
+        console.print(f"\n  Validation: {status_icon}")
+        console.print(f"  Spec endpoints: {result.spec_endpoints}")
+        console.print(f"  Inventory endpoints: {result.inventory_endpoints}")
+        console.print(f"  New in spec: [cyan]{result.new_in_spec}[/]")
+        console.print(f"  Removed from spec: [yellow]{result.removed_from_spec}[/]")
+        console.print(f"  Errors: [red]{len(result.errors)}[/]")
+        console.print(f"  Warnings: [yellow]{len(result.warnings)}[/]")
+
+        if result.violations:
+            table = Table(title="Violations")
+            table.add_column("Severity", width=10)
+            table.add_column("Rule", width=24)
+            table.add_column("Endpoint", width=30)
+            table.add_column("Message")
+
+            sev_colors = {"error": "red", "warning": "yellow", "info": "dim"}
+            for v in result.violations:
+                color = sev_colors.get(v.severity.value, "white")
+                table.add_row(
+                    f"[{color}]{v.severity.value}[/]",
+                    v.rule,
+                    v.endpoint or "-",
+                    v.message,
+                )
+            console.print(table)
+
+    if output:
+        Path(output).write_text(json.dumps(result.to_dict(), indent=2))
+        console.print(f"\n[green]Results saved to {output}[/]")
+
+    if not result.passed:
+        sys.exit(1)
+
+
+# ── Auto-Remediation ──
+
+
+@main.command(name="generate-waf")
+@click.option("--format", "-f", type=click.Choice(["nginx", "modsecurity", "aws"]), default="nginx")
+@click.option("--output", "-o", type=click.Path(), help="Save rules to file")
+@click.pass_context
+def generate_waf(ctx, format: str, output: str):
+    """Generate WAF rules to block shadow APIs."""
+    from .remediation import WAFRuleGenerator
+
+    db = get_db(ctx)
+    gen = WAFRuleGenerator(db)
+
+    if format == "nginx":
+        rules = gen.generate_nginx_rules()
+    elif format == "modsecurity":
+        rules = gen.generate_modsecurity_rules()
+    else:
+        rules = json.dumps(gen.generate_aws_waf_rules(), indent=2)
+
+    if output:
+        Path(output).write_text(rules)
+        console.print(f"[green]WAF rules saved to {output}[/]")
+    else:
+        console.print(rules)
+
+
+@main.command(name="generate-spec")
+@click.option("--undocumented-only", "-u", is_flag=True, help="Only generate for undocumented endpoints")
+@click.option("--title", "-t", default="Auto-Generated API Spec", help="Spec title")
+@click.option("--output", "-o", type=click.Path(), default="openapi-generated.json", help="Output file")
+@click.pass_context
+def generate_spec(ctx, undocumented_only: bool, title: str, output: str):
+    """Auto-generate an OpenAPI spec from observed traffic."""
+    from .remediation import SpecGenerator
+
+    db = get_db(ctx)
+    gen = SpecGenerator(db)
+
+    if undocumented_only:
+        spec = gen.generate_for_undocumented(title=title)
+    else:
+        spec = gen.generate_spec(title=title)
+
+    Path(output).write_text(json.dumps(spec, indent=2, default=str))
+    endpoint_count = len(spec.get("paths", {}))
+    console.print(f"[green]OpenAPI spec generated: {output} ({endpoint_count} paths)[/]")
+
+
+# ── Dependency Graph ──
+
+
+@main.command(name="graph")
+@click.option("--format", "-f", type=click.Choice(["mermaid", "json", "summary"]), default="summary")
+@click.option("--output", "-o", type=click.Path(), help="Save to file")
+@click.pass_context
+def graph_cmd(ctx, format: str, output: str):
+    """Show service dependency graph and blast radius analysis."""
+    from .graph import DependencyGraph
+
+    db = get_db(ctx)
+    graph = DependencyGraph()
+    graph.build_from_database(db)
+
+    if format == "mermaid":
+        result = graph.to_mermaid()
+        if output:
+            Path(output).write_text(result)
+            console.print(f"[green]Mermaid diagram saved to {output}[/]")
+        else:
+            console.print(result)
+
+    elif format == "json":
+        result = json.dumps(graph.to_dict(), indent=2, default=str)
+        if output:
+            Path(output).write_text(result)
+            console.print(f"[green]Graph JSON saved to {output}[/]")
+        else:
+            console.print(result)
+
+    else:
+        data = graph.to_dict()
+        console.print(f"\n[bold]Dependency Graph[/]")
+        console.print(f"  Nodes: {data['stats']['total_nodes']}")
+        console.print(f"  Edges: {data['stats']['total_edges']}")
+        console.print(f"  Services: {data['stats']['services']}")
+        console.print(f"  Third parties: {data['stats']['third_parties']}")
+
+        critical = graph.find_critical_paths()
+        if critical:
+            table = Table(title="Critical Services (most dependents)")
+            table.add_column("Service")
+            table.add_column("Calls", justify="right")
+            table.add_column("Endpoints", justify="right")
+            for n in critical[:5]:
+                table.add_row(n.name, str(n.total_calls), str(n.endpoint_count))
+            console.print(table)
+
+        spofs = graph.find_single_points_of_failure()
+        if spofs:
+            console.print(Panel(
+                "\n".join(f"[red]{s['service']}[/] — affects {s['affected_percentage']}% of services" for s in spofs),
+                title="Single Points of Failure",
+                border_style="red",
+            ))
+
+        orphans = graph.find_orphaned_services()
+        if orphans:
+            console.print(f"\n[yellow]Orphaned services:[/] {', '.join(n.name for n in orphans)}")
+
+
 # ── Report Rendering ──
 
 

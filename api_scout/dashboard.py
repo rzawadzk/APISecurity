@@ -78,6 +78,96 @@ async def api_scan_history():
     return db.get_scan_history()
 
 
+# ── Dependency Graph API ──
+
+@app.get("/api/graph")
+async def api_dependency_graph():
+    from .graph import DependencyGraph
+    graph = DependencyGraph()
+    graph.build_from_database(db)
+    return graph.to_dict()
+
+
+@app.get("/api/graph/blast-radius/{service_name}")
+async def api_blast_radius(service_name: str):
+    from .graph import DependencyGraph
+    graph = DependencyGraph()
+    graph.build_from_database(db)
+    return graph.blast_radius(service_name)
+
+
+@app.get("/api/graph/critical-paths")
+async def api_critical_paths():
+    from .graph import DependencyGraph
+    graph = DependencyGraph()
+    graph.build_from_database(db)
+    return {
+        "critical_services": [n.to_dict() for n in graph.find_critical_paths()],
+        "spofs": graph.find_single_points_of_failure(),
+        "orphaned": [n.to_dict() for n in graph.find_orphaned_services()],
+    }
+
+
+@app.get("/api/graph/mermaid")
+async def api_graph_mermaid():
+    from .graph import DependencyGraph
+    graph = DependencyGraph()
+    graph.build_from_database(db)
+    return {"mermaid": graph.to_mermaid()}
+
+
+@app.get("/api/graph/d3")
+async def api_graph_d3():
+    from .graph import DependencyGraph
+    graph = DependencyGraph()
+    graph.build_from_database(db)
+    return json.loads(graph.to_d3_json())
+
+
+# ── Remediation API ──
+
+@app.get("/api/remediation/waf/nginx")
+async def api_waf_nginx():
+    from .remediation import WAFRuleGenerator
+    gen = WAFRuleGenerator(db)
+    return {"rules": gen.generate_nginx_rules()}
+
+
+@app.get("/api/remediation/waf/modsecurity")
+async def api_waf_modsecurity():
+    from .remediation import WAFRuleGenerator
+    gen = WAFRuleGenerator(db)
+    return {"rules": gen.generate_modsecurity_rules()}
+
+
+@app.get("/api/remediation/waf/aws")
+async def api_waf_aws():
+    from .remediation import WAFRuleGenerator
+    gen = WAFRuleGenerator(db)
+    return gen.generate_aws_waf_rules()
+
+
+@app.get("/api/remediation/spec")
+async def api_generate_spec():
+    from .remediation import SpecGenerator
+    gen = SpecGenerator(db)
+    return gen.generate_spec()
+
+
+@app.get("/api/remediation/spec/undocumented")
+async def api_generate_spec_undocumented():
+    from .remediation import SpecGenerator
+    gen = SpecGenerator(db)
+    return gen.generate_for_undocumented()
+
+
+# ── Graph Visualization Page ──
+
+@app.get("/graph", response_class=HTMLResponse)
+async def graph_page():
+    return GRAPH_HTML
+
+
 # ── HTML Dashboard ──
 
 
@@ -406,6 +496,7 @@ DASHBOARD_HTML = """
     <div class="header">
         <h1><span class="logo">🔍</span> API Scout</h1>
         <div class="header-actions">
+            <a href="/graph" style="color:var(--accent);text-decoration:none;font-size:13px;margin-right:8px;">Dependency Graph</a>
             <input type="text" class="search-box" id="searchBox" placeholder="Search endpoints...">
             <button class="refresh-btn" onclick="refreshAll()">Refresh</button>
             <span class="last-updated" id="lastUpdated"></span>
@@ -696,6 +787,187 @@ DASHBOARD_HTML = """
 
         // Initial load
         refreshAll();
+    </script>
+</body>
+</html>
+"""
+
+
+GRAPH_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Scout — Dependency Graph</title>
+    <style>
+        :root {
+            --bg: #0f1117; --surface: #1a1d27; --surface2: #242736;
+            --border: #2e3245; --text: #e4e6f0; --text-dim: #8b8fa3;
+            --accent: #6c8cff; --green: #4ade80; --red: #f87171;
+            --yellow: #fbbf24; --cyan: #22d3ee; --purple: #a78bfa;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; background: var(--bg); color: var(--text); }
+        .header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 16px 32px; display: flex; align-items: center; justify-content: space-between; }
+        .header h1 { font-size: 20px; font-weight: 600; }
+        .header a { color: var(--accent); text-decoration: none; font-size: 14px; }
+        .container { display: grid; grid-template-columns: 1fr 320px; height: calc(100vh - 60px); }
+        #graphCanvas { width: 100%; height: 100%; background: var(--bg); }
+        .sidebar { background: var(--surface); border-left: 1px solid var(--border); padding: 20px; overflow-y: auto; }
+        .sidebar h3 { font-size: 14px; margin-bottom: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+        .sidebar-section { margin-bottom: 24px; }
+        .node-list { list-style: none; }
+        .node-list li { padding: 8px 12px; border-radius: 6px; margin-bottom: 4px; font-size: 13px; cursor: pointer; display: flex; justify-content: space-between; }
+        .node-list li:hover { background: var(--surface2); }
+        .node-list .count { color: var(--text-dim); font-size: 11px; }
+        .badge-critical { color: var(--red); }
+        .badge-service { color: var(--accent); }
+        .badge-third-party { color: var(--purple); }
+        .blast-panel { display: none; background: var(--surface2); border-radius: 8px; padding: 16px; margin-top: 12px; }
+        .blast-panel.visible { display: block; }
+        .blast-panel h4 { font-size: 13px; margin-bottom: 8px; }
+        .blast-value { font-size: 28px; font-weight: 700; color: var(--red); }
+        svg text { fill: var(--text); font-size: 11px; font-family: -apple-system, system-ui, sans-serif; }
+        svg line { stroke: var(--border); stroke-opacity: 0.6; }
+        svg circle { cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Dependency Graph</h1>
+        <a href="/">Back to Dashboard</a>
+    </div>
+    <div class="container">
+        <svg id="graphCanvas"></svg>
+        <div class="sidebar">
+            <div class="sidebar-section">
+                <h3>Critical Services</h3>
+                <ul class="node-list" id="criticalList"></ul>
+            </div>
+            <div class="sidebar-section">
+                <h3>Single Points of Failure</h3>
+                <ul class="node-list" id="spofList"></ul>
+            </div>
+            <div class="sidebar-section">
+                <h3>Blast Radius</h3>
+                <div class="blast-panel" id="blastPanel">
+                    <h4 id="blastService"></h4>
+                    <div class="blast-value" id="blastCount">0</div>
+                    <div style="color:var(--text-dim); font-size:12px; margin-top:4px;">services affected</div>
+                    <ul class="node-list" id="blastList" style="margin-top:12px;"></ul>
+                </div>
+            </div>
+            <div class="sidebar-section">
+                <h3>Orphaned Services</h3>
+                <ul class="node-list" id="orphanList"></ul>
+            </div>
+        </div>
+    </div>
+    <script>
+        async function fetchJSON(url) { return (await fetch(url)).json(); }
+
+        async function loadGraph() {
+            const [graphData, analysis] = await Promise.all([
+                fetchJSON('/api/graph/d3'),
+                fetchJSON('/api/graph/critical-paths'),
+            ]);
+            renderForceGraph(graphData);
+            renderSidebar(analysis);
+        }
+
+        function renderForceGraph(data) {
+            const svg = document.getElementById('graphCanvas');
+            const rect = svg.getBoundingClientRect();
+            const w = rect.width, h = rect.height;
+
+            if (!data.nodes.length) {
+                svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" fill="#8b8fa3">No graph data. Run analyze or scan first.</text>';
+                return;
+            }
+
+            // Simple force layout (no D3 dependency — uses basic simulation)
+            const nodes = data.nodes.map(n => ({...n, x: w/2 + (Math.random()-0.5)*300, y: h/2 + (Math.random()-0.5)*300, vx:0, vy:0}));
+            const links = data.links.filter(l => nodes.find(n=>n.id===l.source) && nodes.find(n=>n.id===l.target));
+            const nodeMap = Object.fromEntries(nodes.map(n => [n.id, n]));
+
+            // Run simple force simulation
+            for (let tick = 0; tick < 200; tick++) {
+                // Repulsion
+                for (let i = 0; i < nodes.length; i++) {
+                    for (let j = i+1; j < nodes.length; j++) {
+                        let dx = nodes[j].x - nodes[i].x, dy = nodes[j].y - nodes[i].y;
+                        let dist = Math.sqrt(dx*dx + dy*dy) || 1;
+                        let force = 5000 / (dist * dist);
+                        nodes[i].vx -= dx/dist * force; nodes[i].vy -= dy/dist * force;
+                        nodes[j].vx += dx/dist * force; nodes[j].vy += dy/dist * force;
+                    }
+                }
+                // Attraction (links)
+                for (const l of links) {
+                    const s = nodeMap[l.source], t = nodeMap[l.target];
+                    if (!s || !t) continue;
+                    let dx = t.x - s.x, dy = t.y - s.y;
+                    let dist = Math.sqrt(dx*dx + dy*dy) || 1;
+                    let force = (dist - 150) * 0.01;
+                    s.vx += dx/dist * force; s.vy += dy/dist * force;
+                    t.vx -= dx/dist * force; t.vy -= dy/dist * force;
+                }
+                // Center gravity
+                for (const n of nodes) {
+                    n.vx += (w/2 - n.x) * 0.001;
+                    n.vy += (h/2 - n.y) * 0.001;
+                    n.x += n.vx * 0.3; n.y += n.vy * 0.3;
+                    n.vx *= 0.9; n.vy *= 0.9;
+                    n.x = Math.max(40, Math.min(w-40, n.x));
+                    n.y = Math.max(40, Math.min(h-40, n.y));
+                }
+            }
+
+            const colors = {1: '#6c8cff', 2: '#4ade80', 3: '#a78bfa'};
+            let svgContent = '';
+
+            // Draw links
+            for (const l of links) {
+                const s = nodeMap[l.source], t = nodeMap[l.target];
+                if (!s || !t) continue;
+                svgContent += `<line x1="${s.x}" y1="${s.y}" x2="${t.x}" y2="${t.y}" stroke-width="${Math.min(l.width||1,5)}" />`;
+            }
+            // Draw nodes
+            for (const n of nodes) {
+                const r = Math.max(8, Math.min(30, n.size || 10));
+                const c = colors[n.group] || '#8b8fa3';
+                svgContent += `<circle cx="${n.x}" cy="${n.y}" r="${r}" fill="${c}" opacity="0.8" onclick="showBlastRadius('${n.id}')" />`;
+                svgContent += `<text x="${n.x}" y="${n.y - r - 5}" text-anchor="middle">${n.id.length > 20 ? n.id.slice(0,18)+'...' : n.id}</text>`;
+            }
+            svg.innerHTML = svgContent;
+        }
+
+        function renderSidebar(analysis) {
+            document.getElementById('criticalList').innerHTML = analysis.critical_services.map(s =>
+                `<li onclick="showBlastRadius('${s.id}')"><span class="badge-service">${s.id}</span><span class="count">${s.total_calls} calls</span></li>`
+            ).join('') || '<li style="color:var(--text-dim)">None found</li>';
+
+            document.getElementById('spofList').innerHTML = analysis.spofs.map(s =>
+                `<li onclick="showBlastRadius('${s.service}')"><span class="badge-critical">${s.service}</span><span class="count">${s.affected_percentage}%</span></li>`
+            ).join('') || '<li style="color:var(--text-dim)">None found</li>';
+
+            document.getElementById('orphanList').innerHTML = analysis.orphaned.map(s =>
+                `<li><span class="badge-third-party">${s.id}</span><span class="count">${s.type}</span></li>`
+            ).join('') || '<li style="color:var(--text-dim)">None found</li>';
+        }
+
+        async function showBlastRadius(service) {
+            const data = await fetchJSON(`/api/graph/blast-radius/${encodeURIComponent(service)}`);
+            document.getElementById('blastPanel').classList.add('visible');
+            document.getElementById('blastService').textContent = service;
+            document.getElementById('blastCount').textContent = data.affected_count;
+            document.getElementById('blastList').innerHTML = data.affected_services.map(s =>
+                `<li>${s}</li>`
+            ).join('') || '<li style="color:var(--text-dim)">No downstream impact</li>';
+        }
+
+        loadGraph();
     </script>
 </body>
 </html>
