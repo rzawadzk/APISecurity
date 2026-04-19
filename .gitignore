@@ -7,3 +7,7 @@ build/
 *.db-shm
 *.db-wal
 .env
+.pytest_cache/
+.coverage
+htmlcov/
+smoke.db*

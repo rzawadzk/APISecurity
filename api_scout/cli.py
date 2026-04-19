@@ -286,25 +286,239 @@ def watch(
 @main.command()
 @click.option("--host", "-h", default="127.0.0.1", help="Dashboard host (default: 127.0.0.1)")
 @click.option("--port", "-p", default=8080, type=int, help="Dashboard port (default: 8080)")
+@click.option("--log-level", default="INFO", help="Log level (DEBUG/INFO/WARNING/ERROR)")
 @click.pass_context
-def dashboard(ctx, host: str, port: int):
-    """Launch the web dashboard."""
+def dashboard(ctx, host: str, port: int, log_level: str):
+    """Launch the web dashboard. Refuses to start without an admin user."""
     import uvicorn
 
     from .dashboard import create_app
 
     db = get_db(ctx)
-    app = create_app(db)
+    try:
+        app = create_app(db, log_level=log_level)
+    except RuntimeError as e:
+        console.print(f"[red]Refusing to start dashboard:[/] {e}")
+        sys.exit(1)
 
     console.print(Panel(
         f"[bold green]API Scout Dashboard[/]\n"
-        f"  URL: [link=http://{host}:{port}]http://{host}:{port}[/link]\n"
-        f"  DB:  {ctx.obj['db_path']}\n\n"
+        f"  URL:    [link=http://{host}:{port}]http://{host}:{port}[/link]\n"
+        f"  Health: http://{host}:{port}/health\n"
+        f"  Ready:  http://{host}:{port}/ready\n"
+        f"  Metrics:http://{host}:{port}/metrics\n"
+        f"  DB:     {ctx.obj['db_path']}\n\n"
+        f"  Auth required. Sign in at /login\n"
         f"  Press Ctrl+C to stop",
         border_style="green",
     ))
 
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    uvicorn.run(app, host=host, port=port, log_level=log_level.lower(), access_log=False)
+
+
+# ── User management ──
+
+VALID_ROLES = ("admin", "analyst", "viewer")
+
+
+@main.group()
+def user():
+    """Manage dashboard users (auth/RBAC)."""
+
+
+@user.command("create")
+@click.argument("username")
+@click.option("--role", default="viewer", type=click.Choice(VALID_ROLES), help="Role")
+@click.option("--email", default=None, help="Optional email")
+@click.option("--password", default=None, help="Password (omit to be prompted)")
+@click.pass_context
+def user_create(ctx, username: str, role: str, email: str, password: str):
+    """Create a new dashboard user."""
+    from .auth import hash_password
+
+    db = get_db(ctx)
+    if db.get_user_by_username(username):
+        console.print(f"[red]User '{username}' already exists.[/]")
+        sys.exit(1)
+
+    if not password:
+        password = click.prompt("Password", hide_input=True, confirmation_prompt=True)
+
+    try:
+        pw_hash = hash_password(password)
+    except ValueError as e:
+        console.print(f"[red]{e}[/]")
+        sys.exit(1)
+
+    user_id = db.create_user(username=username, password_hash=pw_hash, role=role, email=email)
+    db.write_audit(action="user.create", username=username, resource_type="user", resource_id=str(user_id),
+                   details={"role": role, "created_by": "cli"})
+    console.print(f"[green]Created user[/] [bold]{username}[/] (id={user_id}, role={role})")
+
+
+@user.command("list")
+@click.pass_context
+def user_list(ctx):
+    """List all dashboard users."""
+    db = get_db(ctx)
+    users = db.list_users()
+    if not users:
+        console.print("[dim]No users defined yet. Bootstrap with:[/]")
+        console.print("  api-scout user create --role admin <username>")
+        return
+
+    table = Table(title=f"Users ({len(users)})")
+    table.add_column("ID", width=4)
+    table.add_column("Username")
+    table.add_column("Role", width=10)
+    table.add_column("Email")
+    table.add_column("Active", width=8)
+    table.add_column("Last Login", width=20)
+    role_color = {"admin": "red", "analyst": "yellow", "viewer": "cyan"}
+    for u in users:
+        active = "[green]yes[/]" if u["is_active"] else "[dim]no[/]"
+        rc = role_color.get(u["role"], "white")
+        table.add_row(
+            str(u["id"]),
+            u["username"],
+            f"[{rc}]{u['role']}[/]",
+            u["email"] or "-",
+            active,
+            u["last_login_at"] or "-",
+        )
+    console.print(table)
+
+
+@user.command("passwd")
+@click.argument("username")
+@click.option("--password", default=None, help="New password (omit to be prompted)")
+@click.pass_context
+def user_passwd(ctx, username: str, password: str):
+    """Reset a user's password."""
+    from .auth import hash_password
+
+    db = get_db(ctx)
+    u = db.get_user_by_username(username)
+    if not u:
+        console.print(f"[red]User '{username}' not found.[/]")
+        sys.exit(1)
+    if not password:
+        password = click.prompt("New password", hide_input=True, confirmation_prompt=True)
+    try:
+        pw_hash = hash_password(password)
+    except ValueError as e:
+        console.print(f"[red]{e}[/]")
+        sys.exit(1)
+    db.update_user_password(u["id"], pw_hash)
+    db.delete_sessions_for_user(u["id"])
+    db.write_audit(action="user.password_reset", username=username, resource_type="user", resource_id=str(u["id"]),
+                   details={"reset_by": "cli"})
+    console.print(f"[green]Password updated for {username} (all sessions revoked).[/]")
+
+
+@user.command("role")
+@click.argument("username")
+@click.argument("role", type=click.Choice(VALID_ROLES))
+@click.pass_context
+def user_role(ctx, username: str, role: str):
+    """Change a user's role."""
+    db = get_db(ctx)
+    u = db.get_user_by_username(username)
+    if not u:
+        console.print(f"[red]User '{username}' not found.[/]")
+        sys.exit(1)
+    db.update_user_role(u["id"], role)
+    db.write_audit(action="user.role_change", username=username, resource_type="user", resource_id=str(u["id"]),
+                   details={"new_role": role, "changed_by": "cli"})
+    console.print(f"[green]{username} → {role}[/]")
+
+
+@user.command("disable")
+@click.argument("username")
+@click.pass_context
+def user_disable(ctx, username: str):
+    """Disable a user (preserves audit history; cannot log in)."""
+    db = get_db(ctx)
+    u = db.get_user_by_username(username)
+    if not u:
+        console.print(f"[red]User '{username}' not found.[/]")
+        sys.exit(1)
+    db.set_user_active(u["id"], False)
+    db.delete_sessions_for_user(u["id"])
+    db.write_audit(action="user.disable", username=username, resource_type="user", resource_id=str(u["id"]))
+    console.print(f"[yellow]{username} disabled (sessions revoked).[/]")
+
+
+@user.command("enable")
+@click.argument("username")
+@click.pass_context
+def user_enable(ctx, username: str):
+    """Re-enable a disabled user."""
+    db = get_db(ctx)
+    u = db.get_user_by_username(username)
+    if not u:
+        console.print(f"[red]User '{username}' not found.[/]")
+        sys.exit(1)
+    db.set_user_active(u["id"], True)
+    db.write_audit(action="user.enable", username=username, resource_type="user", resource_id=str(u["id"]))
+    console.print(f"[green]{username} enabled.[/]")
+
+
+@user.command("delete")
+@click.argument("username")
+@click.confirmation_option(prompt="Delete user permanently?")
+@click.pass_context
+def user_delete(ctx, username: str):
+    """Permanently delete a user."""
+    db = get_db(ctx)
+    u = db.get_user_by_username(username)
+    if not u:
+        console.print(f"[red]User '{username}' not found.[/]")
+        sys.exit(1)
+    # Refuse to delete the last admin
+    if u["role"] == "admin":
+        admins = [x for x in db.list_users() if x["role"] == "admin" and x["is_active"]]
+        if len(admins) <= 1:
+            console.print("[red]Cannot delete the last active admin.[/]")
+            sys.exit(1)
+    db.delete_user(u["id"])
+    db.write_audit(action="user.delete", username=username, resource_type="user", resource_id=str(u["id"]))
+    console.print(f"[red]Deleted user {username}.[/]")
+
+
+@main.command("audit")
+@click.option("--limit", default=50, help="Number of entries to show")
+@click.option("--action", default=None, help="Filter by action")
+@click.option("--username", default=None, help="Filter by username")
+@click.pass_context
+def audit_cmd(ctx, limit: int, action: str, username: str):
+    """Show recent audit log entries."""
+    db = get_db(ctx)
+    entries = db.get_audit_log(limit=limit, action=action, username=username)
+    if not entries:
+        console.print("[dim]No audit entries match.[/]")
+        return
+    table = Table(title=f"Audit log ({len(entries)})")
+    table.add_column("Time", width=20)
+    table.add_column("User", width=14)
+    table.add_column("Action", width=24)
+    table.add_column("Method", width=8)
+    table.add_column("Path")
+    table.add_column("Code", width=6)
+    table.add_column("IP", width=14)
+    for e in entries:
+        code = e.get("status_code") or ""
+        code_color = "green" if isinstance(code, int) and 200 <= code < 300 else "red" if isinstance(code, int) and code >= 400 else "white"
+        table.add_row(
+            e.get("timestamp", "")[:19],
+            e.get("username") or "-",
+            e.get("action") or "",
+            e.get("method") or "-",
+            e.get("path") or "-",
+            f"[{code_color}]{code}[/]" if code else "-",
+            e.get("ip_address") or "-",
+        )
+    console.print(table)
 
 
 # ── DB Query Commands ──

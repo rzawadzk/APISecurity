@@ -82,12 +82,62 @@ CREATE TABLE IF NOT EXISTS alerts (
     FOREIGN KEY (endpoint_id) REFERENCES endpoints(endpoint_id)
 );
 
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'viewer',
+    email TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_login_at TEXT,
+    failed_login_count INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    user_agent TEXT,
+    ip_address TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+    user_id INTEGER,
+    username TEXT,
+    action TEXT NOT NULL,
+    resource_type TEXT,
+    resource_id TEXT,
+    method TEXT,
+    path TEXT,
+    ip_address TEXT,
+    user_agent TEXT,
+    status_code INTEGER,
+    details TEXT
+);
+
+CREATE TABLE IF NOT EXISTS app_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_endpoints_status ON endpoints(status);
 CREATE INDEX IF NOT EXISTS idx_endpoints_last_seen ON endpoints(last_seen);
 CREATE INDEX IF NOT EXISTS idx_traffic_timestamp ON traffic_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_traffic_path ON traffic_log(path_pattern);
 CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(alert_type);
 CREATE INDEX IF NOT EXISTS idx_alerts_ack ON alerts(acknowledged);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
 """
 
 
@@ -436,3 +486,207 @@ class Database:
             "active_alerts": active_alerts,
             "recent_scans": [dict(r) for r in recent_scans],
         }
+
+    # ── App metadata (KV store) ──
+
+    def meta_get(self, key: str) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT value FROM app_meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def meta_set(self, key: str, value: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO app_meta (key, value, updated_at)
+                VALUES (?, ?, datetime('now'))
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')
+                """,
+                (key, value),
+            )
+
+    # ── Users ──
+
+    def create_user(
+        self,
+        username: str,
+        password_hash: str,
+        role: str = "viewer",
+        email: Optional[str] = None,
+    ) -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO users (username, password_hash, role, email) VALUES (?, ?, ?, ?)",
+                (username, password_hash, role, email),
+            )
+            return cur.lastrowid
+
+    def get_user_by_username(self, username: str) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE username = ?", (username,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_user_by_id(self, user_id: int) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_users(self) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id, username, role, email, is_active, created_at, last_login_at FROM users ORDER BY username").fetchall()
+        return [dict(r) for r in rows]
+
+    def count_users(self, active_only: bool = False) -> int:
+        with self._connect() as conn:
+            if active_only:
+                row = conn.execute("SELECT COUNT(*) AS c FROM users WHERE is_active = 1").fetchone()
+            else:
+                row = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()
+        return row["c"]
+
+    def update_user_password(self, user_id: int, password_hash: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE users SET password_hash = ?, failed_login_count = 0, locked_until = NULL WHERE id = ?",
+                (password_hash, user_id),
+            )
+
+    def update_user_role(self, user_id: int, role: str) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
+
+    def set_user_active(self, user_id: int, is_active: bool) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE users SET is_active = ? WHERE id = ?", (1 if is_active else 0, user_id))
+
+    def delete_user(self, user_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+
+    def record_login_success(self, user_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE users SET last_login_at = datetime('now'), failed_login_count = 0, locked_until = NULL WHERE id = ?",
+                (user_id,),
+            )
+
+    def record_login_failure(self, user_id: int, lockout_threshold: int = 5, lockout_minutes: int = 15) -> None:
+        """Increment failed login counter; lock account after threshold."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE users SET failed_login_count = failed_login_count + 1 WHERE id = ?",
+                (user_id,),
+            )
+            # Lock if over threshold
+            row = conn.execute("SELECT failed_login_count FROM users WHERE id = ?", (user_id,)).fetchone()
+            if row and row["failed_login_count"] >= lockout_threshold:
+                conn.execute(
+                    "UPDATE users SET locked_until = datetime('now', ?) WHERE id = ?",
+                    (f"+{lockout_minutes} minutes", user_id),
+                )
+
+    # ── Sessions ──
+
+    def create_session(
+        self,
+        session_id: str,
+        user_id: int,
+        expires_at: datetime,
+        user_agent: Optional[str] = None,
+        ip_address: Optional[str] = None,
+    ) -> None:
+        # Store timestamps in SQLite's native format ("YYYY-MM-DD HH:MM:SS")
+        # so that string comparison against datetime('now') sorts correctly.
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO sessions (id, user_id, expires_at, user_agent, ip_address) VALUES (?, ?, ?, ?, ?)",
+                (
+                    session_id,
+                    user_id,
+                    expires_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    user_agent,
+                    ip_address,
+                ),
+            )
+
+    def get_session(self, session_id: str) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT s.*, u.username, u.role, u.is_active
+                FROM sessions s JOIN users u ON s.user_id = u.id
+                WHERE s.id = ? AND s.expires_at > datetime('now') AND u.is_active = 1
+                """,
+                (session_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def delete_session(self, session_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+
+    def delete_sessions_for_user(self, user_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+
+    def purge_expired_sessions(self) -> int:
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM sessions WHERE expires_at <= datetime('now')")
+            return cur.rowcount
+
+    # ── Audit log ──
+
+    def write_audit(
+        self,
+        action: str,
+        *,
+        user_id: Optional[int] = None,
+        username: Optional[str] = None,
+        resource_type: Optional[str] = None,
+        resource_id: Optional[str] = None,
+        method: Optional[str] = None,
+        path: Optional[str] = None,
+        ip_address: Optional[str] = None,
+        user_agent: Optional[str] = None,
+        status_code: Optional[int] = None,
+        details: Optional[dict] = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO audit_log (
+                    user_id, username, action, resource_type, resource_id,
+                    method, path, ip_address, user_agent, status_code, details
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id, username, action, resource_type, resource_id,
+                    method, path, ip_address, user_agent, status_code,
+                    json.dumps(details) if details else None,
+                ),
+            )
+
+    def get_audit_log(
+        self,
+        limit: int = 200,
+        action: Optional[str] = None,
+        username: Optional[str] = None,
+    ) -> list[dict]:
+        clauses = []
+        params: list = []
+        if action:
+            clauses.append("action = ?")
+            params.append(action)
+        if username:
+            clauses.append("username = ?")
+            params.append(username)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM audit_log {where} ORDER BY timestamp DESC LIMIT ?",
+                tuple(params),
+            ).fetchall()
+        return [dict(r) for r in rows]
