@@ -1,0 +1,68 @@
+API Scout
+Copyright 2026 Rafal Zawadzki
+
+This product is licensed under the Apache License, Version 2.0 (the "License");
+you may not use this product except in compliance with the License.
+A copy of the License is distributed in the LICENSE file at the root of this
+repository, and is also available at http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
+================================================================================
+Third-party components
+================================================================================
+
+This software includes the following third-party Python packages. Each is
+used under its own license; the effective license of the combined distribution
+is the most restrictive of those listed below.
+
+  bcrypt                    Apache License 2.0
+      https://github.com/pyca/bcrypt
+
+  click                     BSD 3-Clause License
+      https://github.com/pallets/click
+
+  fastapi                   MIT License
+      https://github.com/tiangolo/fastapi
+
+  httpx                     BSD 3-Clause License
+      https://github.com/encode/httpx
+
+  itsdangerous              BSD 3-Clause License
+      https://github.com/pallets/itsdangerous
+
+  prometheus-client         Apache License 2.0
+      https://github.com/prometheus/client_python
+
+  pydantic                  MIT License
+      https://github.com/pydantic/pydantic
+
+  PyYAML                    MIT License
+      https://github.com/yaml/pyyaml
+
+  rich                      MIT License
+      https://github.com/Textualize/rich
+
+  starlette                 BSD 3-Clause License  (transitive via fastapi)
+      https://github.com/encode/starlette
+
+  uvicorn                   BSD 3-Clause License
+      https://github.com/encode/uvicorn
+
+Development-only dependencies:
+
+  pytest                    MIT License
+      https://github.com/pytest-dev/pytest
+
+  pytest-asyncio            Apache License 2.0
+      https://github.com/pytest-dev/pytest-asyncio
+
+================================================================================
+Attribution
+================================================================================
+
+When redistributing this Work in Source or Object form, you must retain this
+NOTICE file along with the LICENSE file, per Section 4(d) of the Apache 2.0
+License.

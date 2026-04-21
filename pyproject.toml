@@ -2,7 +2,28 @@
 name = "api-scout"
 version = "0.2.0"
 description = "API Discovery & Inventory Tool — passive log analysis + active scanning"
+readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [
+    { name = "Rafal Zawadzki", email = "rafzaw@gmail.com" },
+]
+keywords = ["api", "security", "discovery", "inventory", "owasp", "aspm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: System :: Monitoring",
+    "Topic :: System :: Networking :: Monitoring",
+]
 dependencies = [
     "rich>=13.0",
     "httpx>=0.27",
@@ -24,6 +45,12 @@ test = [
     "pytest-asyncio>=0.23",
     "httpx>=0.27",
 ]
+
+[project.urls]
+Homepage = "https://github.com/rzawadzk/APISecurity"
+Repository = "https://github.com/rzawadzk/APISecurity"
+Issues = "https://github.com/rzawadzk/APISecurity/issues"
+Changelog = "https://github.com/rzawadzk/APISecurity/releases"
 
 [project.scripts]
 api-scout = "api_scout.cli:main"

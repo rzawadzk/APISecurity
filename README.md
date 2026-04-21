@@ -224,3 +224,41 @@ API Scout directly addresses **OWASP API9: Improper Inventory Management** and p
 | **API8: Security Misconfiguration** | Detects debug endpoints (`/pprof`, `/metrics`) exposed externally |
 | **API9: Improper Inventory Management** | Core purpose — full API catalog with shadow/zombie detection |
 | **API10: Unsafe Consumption** | DNS/outbound log analysis reveals third-party API dependencies |
+
+---
+
+## Community & governance
+
+| Document | Purpose |
+|---|---|
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, test commands, code style, PR workflow, DCO sign-off |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Contributor Covenant 2.1 — community behaviour standards |
+| [SECURITY.md](SECURITY.md) | How to report a vulnerability; SLA commitments; in/out of scope |
+| [NOTICE](NOTICE) | Third-party attribution required by Apache 2.0 §4(d) |
+| [LICENSE](LICENSE) | Apache License 2.0 full text |
+
+### Reporting issues
+
+- **Bug reports and feature requests** — open a GitHub issue.
+- **Security vulnerabilities** — **do not** open a public issue. Use GitHub
+  Security Advisories or email `rafzaw@gmail.com`; see
+  [SECURITY.md](SECURITY.md) for details.
+- **Code of Conduct incidents** — email `rafzaw@gmail.com` with subject
+  `[conduct] api-scout: <short description>`.
+
+## License
+
+API Scout is licensed under the [Apache License 2.0](LICENSE). In short:
+
+- **Free for commercial and private use.** You can run, modify, and
+  redistribute API Scout in your own projects, including commercial ones.
+- **Attribution required.** Redistributions must retain the
+  [LICENSE](LICENSE) and [NOTICE](NOTICE) files.
+- **Patent grant.** Contributors grant you a royalty-free patent licence
+  covering their contributions (and that grant terminates if you sue the
+  project over patents).
+- **No warranty.** The software is provided "as is".
+
+Contributions are licensed under the same Apache 2.0 terms. We use the
+[Developer Certificate of Origin](CONTRIBUTING.md#developer-certificate-of-origin)
+rather than a CLA — just sign your commits with `git commit -s`.
