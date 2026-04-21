@@ -36,6 +36,7 @@ from .auth import (
     require_analyst,
     require_viewer,
 )
+from .csrf import CSRFMiddleware, generate_token as _csrf_token, set_csrf_cookie
 from .database import Database
 from .models import APIStatus
 from .observability import (
@@ -47,6 +48,7 @@ from .observability import (
     metrics_endpoint,
     readiness,
 )
+from .ratelimit import SlidingWindowLimiter, build_login_limiter
 
 
 log = get_logger(__name__)
@@ -69,9 +71,16 @@ def create_app(database: Database, *, log_level: str = "INFO") -> FastAPI:
     app = FastAPI(title="API Scout Dashboard", version="0.2.0", docs_url=None, redoc_url=None)
     app.state.db = database
     app.state.session_manager = SessionManager(database, secret)
+    # IP-based rate limit on /api/auth/login: 10 attempts / 5 min per client IP.
+    app.state.login_limiter = build_login_limiter()
 
+    # Middleware stack (Starlette add_middleware prepends, so the LAST
+    # added ends up OUTERMOST). The order below yields the runtime stack:
+    #   Audit -> CSRF -> SecurityHeaders -> Prometheus -> app
+    # That way the audit log records CSRF-rejected requests too.
     app.add_middleware(PrometheusMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(CSRFMiddleware)
     app.add_middleware(AuditMiddleware, db=database)
 
     _register_routes(app)
@@ -178,6 +187,8 @@ def _register_routes(app: FastAPI) -> None:
             safe_error = "Account locked. Try again in 15 minutes."
         elif error == "expired":
             safe_error = "Session expired. Please sign in again."
+        elif error == "rate_limit":
+            safe_error = "Too many login attempts from this address. Try again shortly."
         return LOGIN_HTML.replace("{{ERROR}}", safe_error)
 
     @app.post("/api/auth/login")
@@ -188,8 +199,31 @@ def _register_routes(app: FastAPI) -> None:
     ):
         db: Database = request.app.state.db
         sm: SessionManager = request.app.state.session_manager
+        limiter: SlidingWindowLimiter = request.app.state.login_limiter
         ip = _client_ip(request)
         ua = request.headers.get("user-agent")
+
+        # Rate-limit BEFORE authenticate() so we don't burn a bcrypt check per
+        # attempt once the attacker is over the threshold.
+        limit_key = ip or "_unknown"
+        decision = limiter.check(limit_key)
+        if not decision.allowed:
+            LOGIN_ATTEMPTS.labels(result="rate_limited").inc()
+            db.write_audit(
+                action="auth.login.rate_limited",
+                username=username,
+                ip_address=ip,
+                user_agent=ua,
+                status_code=429,
+                details={"retry_after": decision.retry_after_seconds},
+            )
+            log.warning(
+                "login_rate_limited",
+                extra={"ip": ip, "username": username, "retry_after": decision.retry_after_seconds},
+            )
+            resp = RedirectResponse("/login?error=rate_limit", status_code=303)
+            resp.headers["Retry-After"] = str(decision.retry_after_seconds)
+            return resp
 
         user = authenticate(db, username, password)
         if not user:
@@ -223,6 +257,9 @@ def _register_routes(app: FastAPI) -> None:
             samesite="strict",
             path="/",
         )
+        # Rotate the CSRF token on login so a pre-auth token cannot be
+        # replayed against a privileged session.
+        set_csrf_cookie(resp, _csrf_token(), secure=False)
         return resp
 
     @app.post("/api/auth/logout")
@@ -486,15 +523,29 @@ function esc(s) {
     '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;','`':'&#96;','=':'&#61;','/':'&#47;'
   }[c]));
 }
+function csrfToken() {
+  // Read the non-HttpOnly csrf_token cookie. Returns '' if missing.
+  const m = document.cookie.match(/(?:^|;\\s*)csrf_token=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : '';
+}
+async function apiFetch(url, opts) {
+  opts = opts || {};
+  const method = (opts.method || 'GET').toUpperCase();
+  const unsafe = method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS';
+  if (unsafe) {
+    opts.headers = Object.assign({}, opts.headers || {}, { 'X-CSRF-Token': csrfToken() });
+  }
+  return fetch(url, opts);
+}
 async function fetchJSON(url, opts) {
-  const resp = await fetch(url, opts);
+  const resp = await apiFetch(url, opts);
   if (resp.status === 401) { window.location.href = '/login?error=expired'; throw new Error('unauth'); }
   if (resp.status === 403) { throw new Error('forbidden'); }
   return resp.json();
 }
 async function whoami() { try { return await fetchJSON('/api/auth/whoami'); } catch { return null; } }
 async function logout() {
-  try { await fetch('/api/auth/logout', { method: 'POST' }); } catch {}
+  try { await apiFetch('/api/auth/logout', { method: 'POST' }); } catch {}
   window.location.href = '/login';
 }
 """
@@ -772,7 +823,7 @@ async function loadScans() {
 }
 
 async function ackAlert(id) {
-  await fetch('/api/alerts/' + encodeURIComponent(id) + '/acknowledge', { method: 'POST' });
+  await apiFetch('/api/alerts/' + encodeURIComponent(id) + '/acknowledge', { method: 'POST' });
   loadAlerts();
   loadSummary();
 }

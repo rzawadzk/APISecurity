@@ -72,8 +72,11 @@ If you are unsure whether an activity falls within this policy, ask first.
 - Vulnerabilities that require an already-compromised admin account
   (e.g. SQL injection via an admin-only `--db` path argument is not
   a vulnerability — that argument is trusted input from the operator).
-- Rate limiting on the dashboard is a known gap and tracked publicly;
-  reports about it are welcome but do not qualify as novel findings.
+- Rate-limiting bypass via spoofed `X-Forwarded-For` when not behind a
+  trusted reverse proxy. The dashboard honours `X-Forwarded-For` for
+  client-IP attribution; operators are responsible for only accepting
+  that header from trusted upstreams (see hardening recommendations
+  below).
 - Issues in third-party dependencies that have not been published as CVEs
   upstream — please report those to the dependency first; we will track
   and update once a fix ships.

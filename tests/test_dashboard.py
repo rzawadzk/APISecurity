@@ -80,7 +80,7 @@ class TestLoginFlow:
     def test_logout_clears_session(self, client):
         client.post("/api/auth/login", data={"username": "admin", "password": "adminpass1"})
         assert client.get("/api/auth/whoami").status_code == 200
-        client.post("/api/auth/logout")
+        _post(client, "/api/auth/logout")
         # Cookie is cleared; subsequent whoami should be 401
         client.cookies.clear()
         assert client.get("/api/auth/whoami").status_code == 401
@@ -93,6 +93,27 @@ def _login(client: TestClient, username: str, password: str) -> None:
         follow_redirects=False,
     )
     assert r.status_code == 303
+
+
+def _csrf_headers(client: TestClient) -> dict:
+    """Return headers carrying the CSRF token from the TestClient's cookie jar.
+
+    The CSRF cookie is issued on login success and on the first safe request
+    (self-healing middleware). Callers that haven't yet logged in should hit
+    a safe endpoint first so the cookie is present.
+    """
+    token = client.cookies.get("csrf_token")
+    if not token:
+        client.get("/health")  # triggers the self-heal cookie
+        token = client.cookies.get("csrf_token")
+    return {"X-CSRF-Token": token} if token else {}
+
+
+def _post(client: TestClient, url: str, **kwargs):
+    """POST with the CSRF header pre-attached."""
+    headers = kwargs.pop("headers", None) or {}
+    headers.update(_csrf_headers(client))
+    return client.post(url, headers=headers, **kwargs)
 
 
 class TestRBAC:
@@ -111,13 +132,13 @@ class TestRBAC:
     def test_viewer_cannot_ack_alert(self, client_with_all_roles, db):
         db.save_alerts(["Test alert"])
         _login(client_with_all_roles, "viewer", "viewerpass1")
-        r = client_with_all_roles.post("/api/alerts/1/acknowledge")
+        r = _post(client_with_all_roles, "/api/alerts/1/acknowledge")
         assert r.status_code == 403
 
     def test_analyst_can_ack_alert(self, client_with_all_roles, db):
         db.save_alerts(["Test alert"])
         _login(client_with_all_roles, "analyst", "analystpass1")
-        r = client_with_all_roles.post("/api/alerts/1/acknowledge")
+        r = _post(client_with_all_roles, "/api/alerts/1/acknowledge")
         assert r.status_code == 200
 
     def test_viewer_cannot_generate_waf(self, client_with_all_roles):
@@ -163,7 +184,7 @@ class TestAuditLogging:
     def test_acknowledge_alert_is_audited(self, client, db):
         db.save_alerts(["X"])
         _login(client, "admin", "adminpass1")
-        client.post("/api/alerts/1/acknowledge")
+        _post(client, "/api/alerts/1/acknowledge")
         entries = db.get_audit_log(action="alert.acknowledge")
         assert len(entries) == 1
         assert entries[0]["resource_id"] == "1"
@@ -171,7 +192,7 @@ class TestAuditLogging:
     def test_mutating_request_is_audited_by_middleware(self, client, db):
         db.save_alerts(["X"])
         _login(client, "admin", "adminpass1")
-        client.post("/api/alerts/1/acknowledge")
+        _post(client, "/api/alerts/1/acknowledge")
         # Middleware writes an entry for the HTTP request itself
         entries = db.get_audit_log(limit=100)
         assert any(e["action"] == "POST /api/alerts/1/acknowledge" for e in entries)
@@ -237,3 +258,169 @@ class TestXssEscaping:
         # The frontend uses esc() when inserting into DOM.
         data = r.json()
         assert any(payload in a["message"] for a in data)
+
+
+class TestLoginRateLimit:
+    """IP-based throttle on /api/auth/login.
+
+    Uses a non-existent username ("nobody") for spam so the per-account
+    lockout (5 failures / 15 min) never fires — we want to exercise the
+    IP rate limiter in isolation from account lockout.
+    """
+
+    def _spam(self, client, n: int, username: str = "nobody", password: str = "bad"):
+        results = []
+        for _ in range(n):
+            r = client.post(
+                "/api/auth/login",
+                data={"username": username, "password": password},
+                follow_redirects=False,
+            )
+            results.append(r)
+        return results
+
+    def test_blocks_after_threshold(self, client, dashboard_app):
+        # default limiter = 10 attempts / 5 min per IP
+        results = self._spam(client, 11)
+        # First 10 hit the normal failure path → redirect to error=invalid
+        for r in results[:10]:
+            assert r.status_code == 303
+            assert "error=invalid" in r.headers["location"]
+        # 11th gets rate-limited
+        last = results[10]
+        assert last.status_code == 303
+        assert "error=rate_limit" in last.headers["location"]
+        assert last.headers.get("Retry-After") is not None
+        assert int(last.headers["Retry-After"]) > 0
+
+    def test_rate_limit_is_audited(self, client, db):
+        self._spam(client, 11)
+        entries = db.get_audit_log(action="auth.login.rate_limited")
+        assert len(entries) >= 1
+        assert entries[0]["status_code"] == 429
+
+    def test_rate_limit_prevents_bcrypt_when_blocked(self, client, dashboard_app, db):
+        """Blocked attempts must not count as login failures (no bcrypt, no user-lockout)."""
+        self._spam(client, 15)
+        # Only the first 10 should be audited as failures; the rest are rate_limited.
+        failures = db.get_audit_log(action="auth.login.failure")
+        rate_limited = db.get_audit_log(action="auth.login.rate_limited")
+        assert len(failures) == 10
+        assert len(rate_limited) == 5
+
+    def test_valid_credentials_still_work_under_threshold(self, client):
+        # 5 bad attempts, then a valid one within the same window
+        self._spam(client, 5)
+        r = client.post(
+            "/api/auth/login",
+            data={"username": "admin", "password": "adminpass1"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        assert r.headers["location"] == "/"
+
+    def test_valid_credentials_blocked_past_threshold(self, client):
+        """A legitimate user whose IP has burned the quota is still blocked."""
+        self._spam(client, 10)
+        r = client.post(
+            "/api/auth/login",
+            data={"username": "admin", "password": "adminpass1"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        assert "error=rate_limit" in r.headers["location"]
+
+    def test_login_page_shows_rate_limit_message(self, client):
+        body = client.get("/login?error=rate_limit").text
+        assert "Too many login attempts" in body
+
+
+class TestCSRF:
+    """Double-submit-cookie CSRF protection on mutating dashboard routes."""
+
+    def test_missing_token_is_rejected(self, client):
+        # Log in (gets session + CSRF cookies) then POST without the header.
+        _login(client, "admin", "adminpass1")
+        # Strip the header by not passing it
+        r = client.post("/api/auth/logout")
+        assert r.status_code == 403
+        assert "CSRF" in r.text
+
+    def test_mismatched_token_is_rejected(self, client):
+        _login(client, "admin", "adminpass1")
+        r = client.post(
+            "/api/auth/logout",
+            headers={"X-CSRF-Token": "not-the-real-token"},
+        )
+        assert r.status_code == 403
+
+    def test_matching_token_is_accepted(self, client):
+        _login(client, "admin", "adminpass1")
+        cookie = client.cookies.get("csrf_token")
+        assert cookie  # login must set the cookie
+        r = client.post(
+            "/api/auth/logout",
+            headers={"X-CSRF-Token": cookie},
+        )
+        assert r.status_code == 200
+
+    def test_token_rotates_on_login(self, client):
+        # Before login: self-heal may issue one token
+        client.get("/login")
+        pre_login = client.cookies.get("csrf_token")
+        assert pre_login is not None
+        _login(client, "admin", "adminpass1")
+        post_login = client.cookies.get("csrf_token")
+        assert post_login is not None
+        assert post_login != pre_login
+
+    def test_login_endpoint_is_exempt(self, client):
+        # No CSRF cookie/header required to hit /api/auth/login
+        client.cookies.clear()
+        r = client.post(
+            "/api/auth/login",
+            data={"username": "admin", "password": "adminpass1"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303  # successful redirect, not 403
+
+    def test_health_ready_metrics_exempt(self, client):
+        assert client.get("/health").status_code == 200
+        assert client.get("/ready").status_code == 200
+        assert client.get("/metrics").status_code == 200
+
+    def test_get_requests_do_not_require_token(self, client):
+        _login(client, "admin", "adminpass1")
+        # Mutating header NOT sent, plain GET should still work
+        assert client.get("/api/summary").status_code == 200
+
+    def test_form_submission_can_carry_token_in_body(self, client, db):
+        """Classic HTML form POSTs may put the token in a hidden field."""
+        db.save_alerts(["X"])
+        _login(client, "admin", "adminpass1")
+        cookie = client.cookies.get("csrf_token")
+        r = client.post(
+            "/api/alerts/1/acknowledge",
+            data={"csrf_token": cookie},
+        )
+        assert r.status_code == 200
+
+    def test_self_heal_sets_token_on_unauthenticated_get(self, client):
+        """An anonymous GET should receive a fresh CSRF cookie for later use."""
+        client.cookies.clear()
+        assert client.cookies.get("csrf_token") is None
+        client.get("/health")
+        assert client.cookies.get("csrf_token") is not None
+
+    def test_audit_records_csrf_rejection(self, client, db):
+        _login(client, "admin", "adminpass1")
+        db.save_alerts(["X"])
+        # Send without CSRF header
+        client.post("/api/alerts/1/acknowledge")
+        # Audit middleware captures the rejected request
+        entries = db.get_audit_log(limit=50)
+        rejected = [
+            e for e in entries
+            if e["path"] == "/api/alerts/1/acknowledge" and e["status_code"] == 403
+        ]
+        assert len(rejected) == 1
