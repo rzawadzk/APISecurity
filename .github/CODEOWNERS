@@ -1,0 +1,35 @@
+# Code ownership for API Scout
+#
+# Syntax: <path pattern>  <owner(s)>
+# Each line's last matching owner(s) are requested for review automatically
+# on any pull request that touches the matching paths.
+#
+# Reference: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default fallback — everything needs maintainer sign-off until the team grows.
+*                       @rzawadzk
+
+# Security-sensitive surfaces: auth, sessions, RBAC, CSRF, rate-limit,
+# audit log, and the disclosure policy itself. Any change here should
+# be reviewed with extra care.
+/api_scout/auth.py      @rzawadzk
+/api_scout/csrf.py      @rzawadzk
+/api_scout/ratelimit.py @rzawadzk
+/api_scout/dashboard.py @rzawadzk
+/api_scout/database.py  @rzawadzk
+/SECURITY.md            @rzawadzk
+
+# Legal / governance documents.
+/LICENSE                @rzawadzk
+/NOTICE                 @rzawadzk
+/CODE_OF_CONDUCT.md     @rzawadzk
+/CONTRIBUTING.md        @rzawadzk
+
+# Packaging and release machinery.
+/pyproject.toml         @rzawadzk
+/Dockerfile             @rzawadzk
+/docker-compose.yml     @rzawadzk
+/CHANGELOG.md           @rzawadzk
+
+# CI / repository automation.
+/.github/               @rzawadzk

@@ -98,6 +98,42 @@ Single-page dashboard built with FastAPI and vanilla JavaScript:
 - **Auto-refresh** — Polls the API every 30 seconds for live updates
 - **Dark theme** — Designed for SOC/operations use
 
+### Authentication, RBAC, and audit
+
+Dashboard access is authenticated and role-gated — no endpoint other than
+`/login`, `/health`, `/ready`, and `/metrics` is reachable anonymously.
+
+- **Three roles** — `viewer` (read-only), `analyst` (read + mutations like
+  acknowledging alerts), `admin` (read + mutations + user management).
+- **Sessions** — 256-bit random tokens stored server-side, signed cookies
+  with `HttpOnly`, `SameSite=strict`, and `Secure` when behind TLS.
+- **Passwords** — bcrypt (cost 12) with a timing-equalised check on unknown
+  usernames. Account lockout after 5 failed attempts in 15 minutes.
+- **Login throttling** — IP-based sliding-window rate limiter
+  (10 attempts per 5 minutes per client IP) gates `/api/auth/login`
+  before the bcrypt check so rate-exceeding attackers don't burn CPU.
+- **CSRF** — double-submit cookie protection on every state-changing
+  route. A `csrf_token` cookie is issued on login (and self-healed on
+  safe requests); mutating requests must echo it in `X-CSRF-Token` or a
+  matching form field. Enforcement is constant-time.
+- **Audit log** — every mutating request (POST/PUT/PATCH/DELETE) and every
+  auth event is recorded with timestamp, actor, action, target, and IP.
+  Queryable via `api-scout audit` and via `/audit` in the dashboard.
+
+### Operations & observability
+
+- **`/health`** — liveness probe (always 200 when the process is up).
+- **`/ready`** — readiness probe (checks SQLite is reachable).
+- **`/metrics`** — Prometheus exposition with bounded-cardinality labels
+  (route templates, never raw paths) covering request counts, latency
+  histograms, endpoint totals by status, and active alert counts.
+- **Structured JSON logs** — one event per line with `ts`, `level`,
+  `logger`, `msg`, plus any structured fields attached via `extra={}`.
+- **Security headers** — CSP, `X-Frame-Options: DENY`,
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+  `Permissions-Policy` locked down.
+- **Non-root container** — the shipped Docker image runs as UID 10001.
+
 ### Docker Support
 
 Production-ready containerization with Docker Compose:
@@ -114,22 +150,56 @@ Production-ready containerization with Docker Compose:
 
 ### Local
 
+Requires Python 3.10+.
+
 ```bash
-# Install dependencies
-pip install rich httpx pydantic click pyyaml fastapi uvicorn
+# 1. Install (editable, with test extras optional)
+pip install -e .
 
-# Analyze sample data
-python3 -m api_scout.cli analyze samples/nginx_access.log samples/generic_json.log
+# 2. Populate inventory from sample data
+api-scout --db api_scout.db analyze samples/nginx_access.log samples/generic_json.log
 
-# Launch dashboard
-python3 -m api_scout.cli dashboard
-# Open http://127.0.0.1:8080
+# 3. Bootstrap an admin user — the dashboard refuses to start without one
+api-scout --db api_scout.db user create --role admin admin
+#   (or pass --password devpass01 for non-interactive bootstrap)
+
+# 4. Launch the dashboard
+api-scout --db api_scout.db dashboard -p 8080
+
+# 5. Sign in at http://127.0.0.1:8080/login with the admin credentials.
 ```
+
+Open-to-the-world endpoints (no auth required):
+
+- `http://127.0.0.1:8080/health` — liveness
+- `http://127.0.0.1:8080/ready` — readiness
+- `http://127.0.0.1:8080/metrics` — Prometheus
 
 ### Docker
 
+The shipped image runs as the non-root `apiscout` user (UID 10001) and has
+a built-in `HEALTHCHECK` hitting `/health`.
+
 ```bash
-# Dashboard only
+# Build once
+docker build -t api-scout:local .
+
+# Bootstrap admin inside a shared volume
+docker run --rm -v api-scout-data:/data api-scout:local \
+    --db /data/api_scout.db user create --role admin --password devpass01 admin
+
+# Run the dashboard (terminate TLS in front of it in production)
+docker run -d --name api-scout \
+    -p 8080:8080 \
+    -v api-scout-data:/data \
+    -e API_SCOUT_SECRET="$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')" \
+    api-scout:local --db /data/api_scout.db dashboard -h 0.0.0.0 -p 8080
+```
+
+Or with Docker Compose:
+
+```bash
+# Dashboard only (bootstrap admin first — see above)
 docker compose up dashboard
 
 # Dashboard + continuous monitoring
@@ -142,6 +212,14 @@ docker compose run analyze analyze /logs/access.log
 docker compose run scan scan 192.168.1.0/24
 ```
 
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `API_SCOUT_SECRET` | auto-generated, persisted to DB | Session-cookie signing key. Set to a 48+ character random string in production so you can rotate it without rebuilding. Must be at least 32 characters if set. |
+
+Everything else is configured via CLI flags (`--db`, `--log-level`, etc.).
+
 ---
 
 ## CLI Reference
@@ -150,24 +228,43 @@ docker compose run scan scan 192.168.1.0/24
 api-scout [--db DB_PATH] COMMAND [OPTIONS]
 ```
 
+### Inventory & discovery
+
 | Command | Description |
 |---|---|
 | `analyze <logs...>` | Parse log files and discover endpoints |
 | `scan <targets...>` | Active network scan for HTTP services and OpenAPI specs |
 | `full <logs...> -s <targets>` | Combined log analysis + network scanning |
 | `watch -l <logs> -s <targets>` | Continuous monitoring mode |
-| `dashboard [-h HOST] [-p PORT]` | Launch the web dashboard |
 | `status` | Show inventory summary from the database |
 | `alerts [-u]` | View alerts (optionally unacknowledged only) |
 | `search <query>` | Search endpoints by path, host, or service name |
+| `graph` | Show service dependency graph and blast-radius analysis |
+| `validate <spec>` | Validate an OpenAPI spec against observed traffic |
+| `generate-spec` | Auto-generate an OpenAPI spec from observed traffic |
+| `generate-waf` | Generate WAF rules to block shadow APIs |
 
-### Global Options
+### Dashboard, auth, and audit
+
+| Command | Description |
+|---|---|
+| `dashboard [-h HOST] [-p PORT] [--log-level LVL]` | Launch the web dashboard (refuses to start without an admin user) |
+| `user create <username> [--role admin\|analyst\|viewer] [--password PWD] [--email ADDR]` | Create a dashboard user |
+| `user list` | List all dashboard users |
+| `user passwd <username>` | Reset a user's password (prompts) |
+| `user role <username> <admin\|analyst\|viewer>` | Change a user's role |
+| `user disable <username>` | Disable a user (preserves audit history) |
+| `user enable <username>` | Re-enable a disabled user |
+| `user delete <username>` | Permanently delete a user (refuses if it would remove the last admin) |
+| `audit [--limit N] [--action A] [--username U]` | Show recent audit log entries |
+
+### Global options
 
 | Option | Default | Description |
 |---|---|---|
 | `--db` | `api_scout.db` | Path to the SQLite database file |
 
-### Analyze Options
+### `analyze` options
 
 | Option | Default | Description |
 |---|---|---|
@@ -175,7 +272,7 @@ api-scout [--db DB_PATH] COMMAND [OPTIONS]
 | `-o, --output` | — | Save report as JSON |
 | `--zombie-days` | `30` | Days without traffic before marking as zombie |
 
-### Watch Options
+### `watch` options
 
 | Option | Default | Description |
 |---|---|---|
