@@ -32,6 +32,10 @@ dependencies = [
     "pyyaml>=6.0",
     "fastapi>=0.100",
     "uvicorn>=0.20",
+    # python-multipart is required by FastAPI whenever a route declares
+    # Form(...) parameters — the login endpoint does. FastAPI does not
+    # declare it transitively, so pin it here.
+    "python-multipart>=0.0.9",
     # Auth + sessions
     "bcrypt>=4.0",
     "itsdangerous>=2.1",
