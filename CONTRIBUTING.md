@@ -54,12 +54,22 @@ command on every push.
 
 ```bash
 pip install coverage
-coverage run -m pytest
+coverage run --source=api_scout -m pytest
 coverage report --show-missing
 ```
 
-We aim for ≥60% line coverage on `api_scout/`. New code should not drop the
-overall number.
+**Current coverage** is ~29% overall but ≥86% on the security-critical
+modules (`auth.py`, `csrf.py`, `ratelimit.py`, `proxy.py`,
+`dashboard.py`, `database.py`, `observability.py`). CI hard-gates that
+subset at ≥75%.
+
+**Expectations for contributions:**
+
+- New code in a security-critical module: **≥90% line coverage**, and
+  CI will fail if the subset drops below 75%.
+- New code elsewhere: a unit test covering the happy path plus at least
+  one failure mode. No hard gate yet — raising overall coverage to 60%
+  is a roadmap item. New code should not make the overall number worse.
 
 ## Code style
 

@@ -72,11 +72,11 @@ If you are unsure whether an activity falls within this policy, ask first.
 - Vulnerabilities that require an already-compromised admin account
   (e.g. SQL injection via an admin-only `--db` path argument is not
   a vulnerability — that argument is trusted input from the operator).
-- Rate-limiting bypass via spoofed `X-Forwarded-For` when not behind a
-  trusted reverse proxy. The dashboard honours `X-Forwarded-For` for
-  client-IP attribution; operators are responsible for only accepting
-  that header from trusted upstreams (see hardening recommendations
-  below).
+- Issues reproducible only when `API_SCOUT_TRUSTED_PROXIES` lists a
+  proxy that itself accepts unvalidated upstream `X-Forwarded-For`
+  headers. Operators are responsible for only trusting proxies that
+  overwrite (not append to) the XFF header. By default, no proxies are
+  trusted and XFF is ignored.
 - Issues in third-party dependencies that have not been published as CVEs
   upstream — please report those to the dependency first; we will track
   and update once a fix ships.
@@ -106,19 +106,28 @@ Independent of specific vulnerability reports, API Scout should be deployed
 with the following controls in place. Reports that reduce to "operator did not
 follow these" are treated as documentation bugs, not product vulnerabilities.
 
-1. **Terminate TLS in front of the dashboard.** The shipped server speaks HTTP
-   and sets `Secure` on the session cookie only when behind a TLS proxy.
-2. **Set `API_SCOUT_SECRET`** to a random 48+ character value in production
-   instead of relying on the auto-generated secret, so you can rotate it
-   without rebuilding the container.
-3. **Run the container as the non-root `apiscout` user** (this is the default
-   in the shipped `Dockerfile`).
-4. **Restrict network access** to the dashboard to your internal network or
-   a VPN; the dashboard is not designed to be internet-exposed.
-5. **Back up the SQLite database** (or move to Postgres — planned, see
+1. **Terminate TLS in front of the dashboard.** The shipped server speaks
+   HTTP. When you run it behind a TLS-terminating proxy, also set
+   `API_SCOUT_TRUSTED_PROXIES` (see #2 below) so the app recognises the
+   request as TLS and adds `Secure` to the session + CSRF cookies.
+2. **Configure `API_SCOUT_TRUSTED_PROXIES`** when (and only when) you run
+   behind one or more reverse proxies. Value is a comma-separated list
+   of IPs or CIDRs, e.g. `API_SCOUT_TRUSTED_PROXIES="10.0.0.1,172.16.0.0/12"`.
+   Without it, `X-Forwarded-For` is **ignored** — meaning the audit log
+   and the login rate limiter key on the proxy's IP rather than the real
+   client. Only list proxies that *overwrite* the XFF header (not
+   blindly append upstream values).
+3. **Set `API_SCOUT_SECRET`** to a random 48+ character value in
+   production instead of relying on the auto-generated secret, so you
+   can rotate it without rebuilding the container.
+4. **Run the container as the non-root `apiscout` user** (this is the
+   default in the shipped `Dockerfile`).
+5. **Restrict network access** to the dashboard to your internal network
+   or a VPN; the dashboard is not designed to be internet-exposed.
+6. **Back up the SQLite database** (or move to Postgres — planned, see
    roadmap). Audit-log integrity depends on the file being preserved.
-6. **Rotate admin passwords** periodically and disable the bootstrap admin
-   once delegated admins exist.
+7. **Rotate admin passwords** periodically and disable the bootstrap
+   admin once delegated admins exist.
 
 ## Version support
 

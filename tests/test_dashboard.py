@@ -424,3 +424,98 @@ class TestCSRF:
             if e["path"] == "/api/alerts/1/acknowledge" and e["status_code"] == 403
         ]
         assert len(rejected) == 1
+
+
+class TestTrustedProxyXFF:
+    """End-to-end: XFF is ignored unless the peer is in API_SCOUT_TRUSTED_PROXIES."""
+
+    def _spam_with_xff(self, client, n, xff_value):
+        """POST n login attempts with a forged X-Forwarded-For."""
+        for _ in range(n):
+            client.post(
+                "/api/auth/login",
+                data={"username": "nobody", "password": "bad"},
+                headers={"X-Forwarded-For": xff_value},
+                follow_redirects=False,
+            )
+
+    def test_xff_cannot_bypass_rate_limit_when_untrusted(self, client, db):
+        """Default config: no trusted proxies -> XFF is ignored."""
+        # All 11 attempts are keyed on the real peer (testclient), so the
+        # 11th hits the rate limit regardless of the spoofed XFF header.
+        for i in range(11):
+            r = client.post(
+                "/api/auth/login",
+                data={"username": "nobody", "password": "bad"},
+                # Rotate the spoofed IP each request. If XFF were trusted,
+                # each request would get its own rate-limit bucket.
+                headers={"X-Forwarded-For": f"203.0.113.{i}"},
+                follow_redirects=False,
+            )
+        assert "error=rate_limit" in r.headers["location"]
+
+    def test_xff_changes_bucket_when_trusted(self, tmp_path, monkeypatch, admin_user):
+        """With API_SCOUT_TRUSTED_PROXIES covering the test peer, XFF is honoured."""
+        from fastapi.testclient import TestClient
+        from api_scout.dashboard import create_app
+        from api_scout.database import Database
+
+        # Trust every loopback & 127.x; TestClient(client=(ip, port)) below
+        # sets request.client.host to that IP.
+        monkeypatch.setenv("API_SCOUT_TRUSTED_PROXIES", "127.0.0.0/8")
+        db = Database(tmp_path / "trusted.db")
+        from api_scout.auth import hash_password
+        db.create_user("admin", hash_password("adminpass1"), role="admin")
+        app = create_app(db, log_level="WARNING")
+
+        # TestClient lets us choose the peer IP — put the test client inside the
+        # trusted network.
+        with TestClient(app, client=("127.0.0.1", 12345)) as tc:
+            # Burn 10 attempts from one spoofed client IP.
+            for _ in range(10):
+                tc.post(
+                    "/api/auth/login",
+                    data={"username": "nobody", "password": "bad"},
+                    headers={"X-Forwarded-For": "203.0.113.1"},
+                    follow_redirects=False,
+                )
+            # A request from a *different* XFF should still succeed — each
+            # spoofed client has its own bucket because XFF is now trusted.
+            r = tc.post(
+                "/api/auth/login",
+                data={"username": "nobody", "password": "bad"},
+                headers={"X-Forwarded-For": "203.0.113.99"},
+                follow_redirects=False,
+            )
+            assert "error=invalid" in r.headers["location"]
+            # And the original spoofed client stays limited.
+            r = tc.post(
+                "/api/auth/login",
+                data={"username": "nobody", "password": "bad"},
+                headers={"X-Forwarded-For": "203.0.113.1"},
+                follow_redirects=False,
+            )
+            assert "error=rate_limit" in r.headers["location"]
+
+    def test_audit_log_records_resolved_client_ip(self, tmp_path, monkeypatch, admin_user):
+        """With a trusted proxy, audit log captures the XFF-resolved client IP."""
+        from fastapi.testclient import TestClient
+        from api_scout.auth import hash_password
+        from api_scout.dashboard import create_app
+        from api_scout.database import Database
+
+        monkeypatch.setenv("API_SCOUT_TRUSTED_PROXIES", "127.0.0.0/8")
+        db = Database(tmp_path / "trusted_audit.db")
+        db.create_user("admin", hash_password("adminpass1"), role="admin")
+        app = create_app(db, log_level="WARNING")
+
+        with TestClient(app, client=("127.0.0.1", 0)) as tc:
+            tc.post(
+                "/api/auth/login",
+                data={"username": "admin", "password": "adminpass1"},
+                headers={"X-Forwarded-For": "203.0.113.42"},
+                follow_redirects=False,
+            )
+        entries = db.get_audit_log(action="auth.login.success")
+        assert any(e["ip_address"] == "203.0.113.42" for e in entries), \
+            f"Expected XFF IP in audit log, got {[e['ip_address'] for e in entries]}"

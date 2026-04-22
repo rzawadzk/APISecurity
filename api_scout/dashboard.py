@@ -48,6 +48,7 @@ from .observability import (
     metrics_endpoint,
     readiness,
 )
+from .proxy import ClientIPMiddleware, ClientIPResolver, client_ip_of, tls_of
 from .ratelimit import SlidingWindowLimiter, build_login_limiter
 
 
@@ -76,12 +77,14 @@ def create_app(database: Database, *, log_level: str = "INFO") -> FastAPI:
 
     # Middleware stack (Starlette add_middleware prepends, so the LAST
     # added ends up OUTERMOST). The order below yields the runtime stack:
-    #   Audit -> CSRF -> SecurityHeaders -> Prometheus -> app
-    # That way the audit log records CSRF-rejected requests too.
+    #   ClientIP -> Audit -> CSRF -> SecurityHeaders -> Prometheus -> app
+    # ClientIPMiddleware runs first so request.state.client_ip / .tls are
+    # populated before any downstream middleware or handler reads them.
     app.add_middleware(PrometheusMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(CSRFMiddleware)
     app.add_middleware(AuditMiddleware, db=database)
+    app.add_middleware(ClientIPMiddleware, resolver=ClientIPResolver.from_env())
 
     _register_routes(app)
     return app
@@ -150,11 +153,10 @@ class AuditMiddleware(BaseHTTPMiddleware):
         return resp
 
 
+# Legacy helper kept for any caller still passing a bare request. Prefer
+# reading ``request.state.client_ip`` directly (populated by ClientIPMiddleware).
 def _client_ip(request: Request) -> Optional[str]:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
+    return client_ip_of(request)
 
 
 # ── Routes ──
@@ -247,19 +249,22 @@ def _register_routes(app: FastAPI) -> None:
             user_agent=ua,
             status_code=200,
         )
+        tls = tls_of(request)
         resp = RedirectResponse("/", status_code=303)
         resp.set_cookie(
             key=SESSION_COOKIE_NAME,
             value=signed_cookie,
             max_age=SESSION_TTL_HOURS * 3600,
             httponly=True,
-            secure=False,  # set True behind TLS-terminating proxy in prod
+            # Secure is auto-enabled when the request was observed via TLS
+            # (directly, or via X-Forwarded-Proto from a trusted proxy).
+            secure=tls,
             samesite="strict",
             path="/",
         )
         # Rotate the CSRF token on login so a pre-auth token cannot be
         # replayed against a privileged session.
-        set_csrf_cookie(resp, _csrf_token(), secure=False)
+        set_csrf_cookie(resp, _csrf_token(), secure=tls)
         return resp
 
     @app.post("/api/auth/logout")

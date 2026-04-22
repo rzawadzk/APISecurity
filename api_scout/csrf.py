@@ -97,11 +97,9 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         app,
         *,
         exempt_paths: Optional[Iterable[str]] = None,
-        cookie_secure: bool = False,
     ):
         super().__init__(app)
         self.exempt_paths: frozenset[str] = frozenset(exempt_paths or DEFAULT_EXEMPT_PATHS)
-        self.cookie_secure = cookie_secure
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -135,8 +133,10 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
         # Self-heal: ensure the browser always has a usable token for its
         # next unsafe request. Only set on safe methods to avoid races.
+        # The Secure flag is inherited from ClientIPMiddleware's tls resolution.
         if method in {"GET", "HEAD"} and CSRF_COOKIE_NAME not in request.cookies:
-            set_csrf_cookie(response, generate_token(), secure=self.cookie_secure)
+            tls = bool(getattr(request.state, "tls", False))
+            set_csrf_cookie(response, generate_token(), secure=tls)
 
         return response
 

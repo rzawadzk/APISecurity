@@ -217,6 +217,7 @@ docker compose run scan scan 192.168.1.0/24
 | Variable | Default | Purpose |
 |---|---|---|
 | `API_SCOUT_SECRET` | auto-generated, persisted to DB | Session-cookie signing key. Set to a 48+ character random string in production so you can rotate it without rebuilding. Must be at least 32 characters if set. |
+| `API_SCOUT_TRUSTED_PROXIES` | unset (XFF ignored) | Comma-separated IPs/CIDRs of reverse proxies in front of the dashboard, e.g. `"10.0.0.1,172.16.0.0/12"`. When the request's TCP peer matches one of these, the leftmost `X-Forwarded-For` entry is used as the client IP (for audit + rate limiting) and `X-Forwarded-Proto: https` flips the session/CSRF cookies to `Secure`. **Only list proxies that overwrite (not append to) the XFF header.** |
 
 Everything else is configured via CLI flags (`--db`, `--log-level`, etc.).
 
