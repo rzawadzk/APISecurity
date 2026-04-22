@@ -51,7 +51,7 @@ jobs:
       # tracked as a roadmap item.
       - name: Coverage gate — security-critical modules
         run: |
-          coverage report --include='api_scout/auth.py,api_scout/csrf.py,api_scout/ratelimit.py,api_scout/dashboard.py,api_scout/database.py,api_scout/observability.py,api_scout/proxy.py' --fail-under=75
+          coverage report --include='api_scout/auth.py,api_scout/csrf.py,api_scout/ratelimit.py,api_scout/dashboard.py,api_scout/database.py,api_scout/observability.py,api_scout/proxy.py,api_scout/migrations/__init__.py' --fail-under=75
 
       - name: Upload coverage artifact
         if: matrix.python-version == '3.12'

@@ -67,6 +67,12 @@ build-backend = "setuptools.build_meta"
 include = ["api_scout*"]
 exclude = ["tests*", "samples*"]
 
+# Ship migration SQL files alongside the Python code. Without this,
+# setuptools drops the .sql files from the wheel and runtime
+# migrations break on a pip-installed install.
+[tool.setuptools.package-data]
+"api_scout.migrations" = ["*.sql"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
