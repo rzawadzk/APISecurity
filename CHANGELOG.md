@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Schema migration framework.** Schema is now managed by versioned
+  SQL files in `api_scout/migrations/` rather than an inline `SCHEMA`
+  string. `Database._init_db()` calls `apply_pending()` on every
+  startup; the operation is idempotent. Each migration runs in its
+  own transaction; a failed migration is not recorded, so the next
+  startup retries it. Dialect suffix in filenames
+  (`0001_initial.sqlite.sql` / `0001_initial.postgres.sql`) lets
+  backends ship their own flavour.
+- **Postgres backend.** `Database` accepts a libpq-style URL
+  (`postgresql://…`) or `API_SCOUT_DATABASE_URL` env var; SQLite
+  remains the default and a bare path still works. Install with
+  `pip install 'api-scout[postgres]'`. Dialect differences
+  (placeholder style, `LEAST`/`GREATEST`, `to_char` hour bucketing,
+  `RETURNING id` for autoinserted PKs) are encapsulated in
+  `api_scout/db_dialect.py`. All timestamps are now Python-side
+  ISO-8601 strings, eliminating SQLite-specific `datetime('now')`
+  calls from application SQL.
+- CI now runs the integration subset against a real Postgres 16
+  service container in addition to the SQLite matrix.
+
+### Changed
+
+- `Database.__init__` now accepts a URL in addition to a filesystem
+  path; the `Path`/`str` legacy signature is preserved.
+
 ## [0.2.0] — 2026-04-21
 
 This is the first release intended for operation outside a developer's

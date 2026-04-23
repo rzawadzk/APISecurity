@@ -65,16 +65,29 @@ API Scout generates alerts for common security and operational concerns:
 | **New Endpoint** | First seen within the last 24 hours |
 | **Zombie API** | In spec but no traffic for the configured threshold (default: 30 days) |
 
-### SQLite Persistence
+### Persistence
 
-All data is stored in a local SQLite database with four tables:
+API Scout ships with two backend options:
+
+- **SQLite** (default) — zero-config, file-based, uses WAL mode so the
+  dashboard can read while the watcher writes. Right for single-node
+  deployments.
+- **Postgres** — for multi-node deployments or when you want shared
+  storage across a dashboard + worker fleet. Install with
+  `pip install 'api-scout[postgres]'` and point at it via the
+  `API_SCOUT_DATABASE_URL` environment variable, e.g.
+  `postgresql://user:pass@pghost:5432/apiscout`. The CLI still
+  accepts `--db` as a file path for the SQLite case.
+
+Both backends share the same schema, managed by versioned migrations
+in `api_scout/migrations/` that run automatically on startup. The
+tables are:
 
 - **endpoints** — Full inventory with upsert-on-rescan semantics. Tracks method, path pattern, host, status, auth methods seen, consumers, call counts, error rates, response times, and discovery sources.
 - **traffic_log** — Raw traffic records for historical analysis. Enables timeline charts and trend detection.
 - **scan_history** — Audit trail of every analysis run and network scan with timestamps, target lists, and result counts.
 - **alerts** — Persistent alert store with severity levels, types, acknowledgement status, and timestamps.
-
-The database uses WAL mode for concurrent read/write access, allowing the dashboard to query while the watcher writes.
+- **users / sessions / audit_log** — Auth, session management, and the audit trail used for compliance evidence.
 
 ### Continuous Monitoring (Watch Mode)
 
@@ -218,6 +231,7 @@ docker compose run scan scan 192.168.1.0/24
 |---|---|---|
 | `API_SCOUT_SECRET` | auto-generated, persisted to DB | Session-cookie signing key. Set to a 48+ character random string in production so you can rotate it without rebuilding. Must be at least 32 characters if set. |
 | `API_SCOUT_TRUSTED_PROXIES` | unset (XFF ignored) | Comma-separated IPs/CIDRs of reverse proxies in front of the dashboard, e.g. `"10.0.0.1,172.16.0.0/12"`. When the request's TCP peer matches one of these, the leftmost `X-Forwarded-For` entry is used as the client IP (for audit + rate limiting) and `X-Forwarded-Proto: https` flips the session/CSRF cookies to `Secure`. **Only list proxies that overwrite (not append to) the XFF header.** |
+| `API_SCOUT_DATABASE_URL` | unset (uses SQLite at `--db` path) | Backend connection string. Supports `sqlite:///path/to/file.db` and `postgresql://user:pass@host:5432/dbname`. Requires the `postgres` extra (`pip install 'api-scout[postgres]'`) for the Postgres form. When set, overrides the CLI `--db` flag. |
 
 Everything else is configured via CLI flags (`--db`, `--log-level`, etc.).
 

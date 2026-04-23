@@ -14,6 +14,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from .database import Database
+from .db_dialect import database_url_from_env
 from .inventory import APIInventory
 from .models import APIStatus, AuthMethod
 from .parsers import ALBLogParser, APIGatewayLogParser, GenericLogParser, NginxLogParser
@@ -59,12 +60,23 @@ def auto_detect_parser(file_path: Path):
 
 @click.group()
 @click.version_option(version="0.1.0", prog_name="api-scout")
-@click.option("--db", "db_path", default="api_scout.db", help="Database file path")
+@click.option(
+    "--db",
+    "db_path",
+    default="api_scout.db",
+    help=(
+        "Database path or URL. Defaults to a local SQLite file. "
+        "Overridden by API_SCOUT_DATABASE_URL when set."
+    ),
+)
 @click.pass_context
 def main(ctx, db_path: str):
     """API Scout — Discover and inventory all APIs in your environment."""
     ctx.ensure_object(dict)
-    ctx.obj["db_path"] = db_path
+    # If the operator set API_SCOUT_DATABASE_URL, it wins over --db.
+    # This lets containerised deployments point at Postgres without
+    # touching the command line or config files.
+    ctx.obj["db_path"] = database_url_from_env(default=db_path)
 
 
 def get_db(ctx) -> Database:

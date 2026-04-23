@@ -51,7 +51,7 @@ jobs:
       # tracked as a roadmap item.
       - name: Coverage gate — security-critical modules
         run: |
-          coverage report --include='api_scout/auth.py,api_scout/csrf.py,api_scout/ratelimit.py,api_scout/dashboard.py,api_scout/database.py,api_scout/observability.py,api_scout/proxy.py,api_scout/migrations/__init__.py' --fail-under=75
+          coverage report --include='api_scout/auth.py,api_scout/csrf.py,api_scout/ratelimit.py,api_scout/dashboard.py,api_scout/database.py,api_scout/db_dialect.py,api_scout/observability.py,api_scout/proxy.py,api_scout/migrations/__init__.py' --fail-under=75
 
       - name: Upload coverage artifact
         if: matrix.python-version == '3.12'
@@ -60,6 +60,53 @@ jobs:
           name: coverage-report
           path: coverage.xml
           retention-days: 30
+
+  # Postgres backend smoke test: run the integration subset against
+  # a real Postgres service container. The SQLite tests above already
+  # cover the shared codepaths; this job specifically exercises the
+  # dialect differences (RETURNING id, LEAST/GREATEST, to_char bucket,
+  # psycopg connection handling, and the 0001_initial.postgres.sql
+  # migration).
+  test-postgres:
+    name: pytest (postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: apiscout
+          POSTGRES_DB: apiscout_test
+        ports:
+          - 5432:5432
+        # Give the runner a health probe so pytest doesn't race the
+        # container's startup.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install (including postgres extra)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[test,postgres]'
+
+      - name: Run Postgres integration tests
+        env:
+          API_SCOUT_TEST_POSTGRES_URL: postgresql://postgres:apiscout@localhost:5432/apiscout_test
+        run: |
+          pytest tests/test_postgres_backend.py -v
 
   build-docker:
     name: Docker build
