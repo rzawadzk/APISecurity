@@ -218,7 +218,7 @@ class TestPgTrafficQueries:
                 auth_subject=None,
                 response_time_ms=12.3,
                 host="h",
-                discovery_source=DiscoverySource.LOG_ANALYSIS,
+                discovery_source=DiscoverySource.LOG_NGINX,
             ),
         ]
         pg_db.log_traffic(recs, path_patterns={"/x": "/x"})
