@@ -123,8 +123,17 @@ def applied_versions(conn: Any) -> set[int]:
     """Return the set of migration versions already recorded."""
     cur = conn.execute("SELECT version FROM schema_migrations")
     rows = cur.fetchall()
-    # sqlite3.Row and psycopg tuple-ish rows both support index access.
-    return {int(r[0]) for r in rows}
+    # sqlite3.Row supports both index and name access; psycopg with the
+    # dict_row row-factory returns plain dicts, which only support name
+    # access. Keying by column name is the lowest common denominator.
+    out: set[int] = set()
+    for r in rows:
+        try:
+            out.add(int(r["version"]))
+        except (TypeError, KeyError):
+            # Fallback for drivers that return tuples.
+            out.add(int(r[0]))
+    return out
 
 
 def _utc_iso_now() -> str:
