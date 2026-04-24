@@ -29,6 +29,12 @@ source .venv/bin/activate
 pip install -e '.[test]'
 ```
 
+To hack on the Postgres backend as well, include the `postgres` extra:
+
+```bash
+pip install -e '.[test,postgres]'
+```
+
 Bootstrap a local admin so you can actually open the dashboard:
 
 ```bash
@@ -49,6 +55,27 @@ pytest -x --tb=short         # stop on first failure, short traceback
 
 The test suite must be green before a PR is merged. CI will run the same
 command on every push.
+
+### Postgres integration tests
+
+`tests/test_postgres_backend.py` exercises the Postgres codepaths
+(dialect placeholders, `LEAST`/`GREATEST`, `to_char` hour bucketing,
+`RETURNING id`, `psycopg` row handling). It is **skipped unless** the
+environment variable `API_SCOUT_TEST_POSTGRES_URL` points at a
+libpq-style URL for a Postgres the harness is allowed to write to
+(it truncates every table between tests).
+
+Local setup:
+
+```bash
+docker run --rm -d --name apiscout-pg -p 5432:5432 \
+    -e POSTGRES_PASSWORD=secret postgres:16-alpine
+export API_SCOUT_TEST_POSTGRES_URL=postgresql://postgres:secret@localhost:5432/postgres
+pytest tests/test_postgres_backend.py -v
+```
+
+CI runs the same subset against a `postgres:16-alpine` service
+container on every push — see `.github/workflows/test.yml`.
 
 ### Coverage
 
@@ -107,7 +134,10 @@ Anything touching authentication, session management, RBAC, XSS/injection
 escaping, or audit logging gets extra scrutiny. Specifically:
 
 - Never concatenate user-controlled strings into SQL. Use parameterised
-  queries via `sqlite3`'s `?` placeholders.
+  queries. Placeholders are driver-specific (`?` for SQLite, `%s` for
+  psycopg), so retrieve the current one from `self._ph` inside
+  `Database` methods and interpolate it with an f-string. Never
+  interpolate user data.
 - Never interpolate user-controlled strings into HTML or JavaScript
   literals. The frontend uses an `esc()` helper for this — see the JS
   prelude at the top of `DASHBOARD_HTML` in `api_scout/dashboard.py`.
@@ -196,9 +226,11 @@ Larger contributions in these areas are especially welcome:
   connectors.
 - **Parsers**: additional log formats (Caddy, Traefik, Envoy, GCP load
   balancer, Azure App Gateway).
-- **Postgres backend** alongside SQLite — see the
-  [roadmap discussion](https://github.com/rzawadzk/APISecurity/discussions)
-  for the migration strategy.
+- **Additional backends** beyond SQLite and Postgres (MySQL,
+  CockroachDB). The dialect abstraction in `api_scout/db_dialect.py`
+  is the extension point — add a new `SQLDialect` subclass, a
+  `0001_initial.<name>.sql` migration, and an entry in
+  `dialect_for_url()`.
 - **SSO** (OIDC, SAML).
 
 ## Licensing of contributions

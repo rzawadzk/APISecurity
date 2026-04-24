@@ -64,6 +64,10 @@ If you are unsure whether an activity falls within this policy, ask first.
 - The official Docker image built from the `Dockerfile` in this repository.
 - The dashboard HTTP endpoints (auth, API, health, metrics).
 - The CLI (`api-scout ...`).
+- Both supported database backends (SQLite, and Postgres 16+ via the
+  `[postgres]` extra). SQL-injection-style findings against either
+  backend — or any divergence in security behaviour between them
+  — are in scope.
 - Documentation that, if followed, would lead a user into a vulnerable
   configuration.
 
@@ -124,8 +128,13 @@ follow these" are treated as documentation bugs, not product vulnerabilities.
    default in the shipped `Dockerfile`).
 5. **Restrict network access** to the dashboard to your internal network
    or a VPN; the dashboard is not designed to be internet-exposed.
-6. **Back up the SQLite database** (or move to Postgres — planned, see
-   roadmap). Audit-log integrity depends on the file being preserved.
+6. **Back up the database.** Audit-log integrity depends on durable
+   storage, so whichever backend you use needs a working backup
+   pipeline. SQLite: snapshot the file (use the `.backup` command or
+   copy while the process is stopped — a raw file copy from under a
+   running process can tear with WAL enabled). Postgres: point at a
+   managed service with point-in-time recovery, or run `pg_dump` /
+   WAL archiving yourself.
 7. **Rotate admin passwords** periodically and disable the bootstrap
    admin once delegated admins exist.
 
