@@ -304,38 +304,44 @@ class Database:
         """Store raw traffic records for historical analysis."""
         ph = self._ph
         now = _iso_now()
-        with self._connect() as conn:
-            conn.executemany(
-                f"""
-                INSERT INTO traffic_log (
-                    timestamp, method, path, path_pattern, status_code,
-                    source_ip, source_service, auth_method, auth_subject,
-                    response_time_ms, host, discovery_source, ingested_at
-                ) VALUES (
-                    {ph}, {ph}, {ph}, {ph}, {ph},
-                    {ph}, {ph}, {ph}, {ph},
-                    {ph}, {ph}, {ph}, {ph}
-                )
-                """,
-                [
-                    (
-                        _iso_at(r.timestamp),
-                        r.method,
-                        r.path,
-                        path_patterns.get(r.path) if path_patterns else None,
-                        r.status_code,
-                        r.source_ip,
-                        r.source_service,
-                        r.auth_method.value,
-                        r.auth_subject,
-                        r.response_time_ms,
-                        r.host,
-                        r.discovery_source.value,
-                        now,
-                    )
-                    for r in records
-                ],
+        sql = f"""
+            INSERT INTO traffic_log (
+                timestamp, method, path, path_pattern, status_code,
+                source_ip, source_service, auth_method, auth_subject,
+                response_time_ms, host, discovery_source, ingested_at
+            ) VALUES (
+                {ph}, {ph}, {ph}, {ph}, {ph},
+                {ph}, {ph}, {ph}, {ph},
+                {ph}, {ph}, {ph}, {ph}
             )
+        """
+        params = [
+            (
+                _iso_at(r.timestamp),
+                r.method,
+                r.path,
+                path_patterns.get(r.path) if path_patterns else None,
+                r.status_code,
+                r.source_ip,
+                r.source_service,
+                r.auth_method.value,
+                r.auth_subject,
+                r.response_time_ms,
+                r.host,
+                r.discovery_source.value,
+                now,
+            )
+            for r in records
+        ]
+        with self._connect() as conn:
+            # sqlite3.Connection has executemany on the connection object;
+            # psycopg.Connection does not — batch inserts always go via a
+            # cursor. Use a cursor for both so the code is portable.
+            cur = conn.cursor()
+            try:
+                cur.executemany(sql, params)
+            finally:
+                cur.close()
 
     def get_traffic_stats(self, hours: int = 24) -> dict:
         """Get traffic statistics for the last N hours."""
