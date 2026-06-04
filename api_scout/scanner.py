@@ -1,9 +1,28 @@
-"""Active network scanner — discovers HTTP services and OpenAPI specs."""
+"""Active network scanner — discovers HTTP services and OpenAPI specs.
+
+TLS verification policy
+-----------------------
+
+By default the scanner verifies server certificates the way a normal
+HTTP client would. Many internal staging environments use self-signed
+or expired certs, so we ship an explicit opt-out:
+
+* ``API_SCOUT_INSECURE_SCAN=1`` — disables certificate verification
+  for the scanner only. Logs a warning at startup so the choice is
+  visible. **Do not enable on a host whose scan results you trust:**
+  with verification off, an on-path attacker can impersonate any
+  HTTPS endpoint and feed you a forged OpenAPI spec.
+
+The dashboard's own outbound calls (if any) and the Postgres driver
+are unaffected — this only governs the active scanner.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
+import os
 import socket
 from datetime import datetime
 from typing import Optional
@@ -11,6 +30,27 @@ from typing import Optional
 import httpx
 
 from .models import APIEndpoint, APIStatus, DiscoverySource, ScanResult
+
+
+_log = logging.getLogger(__name__)
+
+
+def _scanner_verify_tls() -> bool:
+    """Return True unless the operator explicitly opted out via env var."""
+    raw = os.environ.get("API_SCOUT_INSECURE_SCAN", "").strip().lower()
+    insecure = raw in {"1", "true", "yes", "on"}
+    if insecure:
+        _log.warning(
+            "scanner_tls_verification_disabled",
+            extra={
+                "msg": (
+                    "API_SCOUT_INSECURE_SCAN is set; the active scanner "
+                    "will accept any TLS certificate. Spec discovery "
+                    "results from HTTPS targets cannot be trusted."
+                ),
+            },
+        )
+    return not insecure
 
 
 # Common ports for HTTP/API services
@@ -119,7 +159,7 @@ async def scan_host(host: str, ports: list[int] | None = None) -> list[ScanResul
     if not open_ports:
         return results
 
-    async with httpx.AsyncClient(verify=False) as client:
+    async with httpx.AsyncClient(verify=_scanner_verify_tls()) as client:
         for port in open_ports:
             for scheme in ("https", "http"):
                 base_url = f"{scheme}://{host}:{port}"

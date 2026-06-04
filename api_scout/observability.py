@@ -121,14 +121,9 @@ def update_inventory_gauges(db: Database) -> None:
     summary = db.get_dashboard_summary()
     for status_name in ("active", "shadow", "zombie", "undocumented", "deprecated"):
         INVENTORY_ENDPOINTS.labels(status=status_name).set(summary.get(status_name, 0))
-    # Severity breakdown for open alerts
-    for alert in db.get_alerts(unacknowledged_only=True, limit=10000):
-        pass  # scan to avoid unused warning
-    # Counts by severity
-    severity_counts: dict[str, int] = {}
-    for alert in db.get_alerts(unacknowledged_only=True, limit=10000):
-        severity_counts[alert["severity"]] = severity_counts.get(alert["severity"], 0) + 1
-    # Reset and set
+    # Severity breakdown for open alerts. Do the GROUP BY in SQL so a
+    # /metrics scrape stays cheap even with millions of historical alerts.
+    severity_counts = db.count_open_alerts_by_severity()
     for sev in ("high", "medium", "low", "info"):
         ALERTS_OPEN.labels(severity=sev).set(severity_counts.get(sev, 0))
 

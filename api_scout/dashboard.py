@@ -22,6 +22,7 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from . import __version__
 from .auth import (
     SESSION_COOKIE_NAME,
     SESSION_TTL_HOURS,
@@ -69,7 +70,7 @@ def create_app(database: Database, *, log_level: str = "INFO") -> FastAPI:
 
     secret = get_or_create_secret(database)
 
-    app = FastAPI(title="API Scout Dashboard", version="0.2.0", docs_url=None, redoc_url=None)
+    app = FastAPI(title="API Scout Dashboard", version=__version__, docs_url=None, redoc_url=None)
     app.state.db = database
     app.state.session_manager = SessionManager(database, secret)
     # IP-based rate limit on /api/auth/login: 10 attempts / 5 min per client IP.

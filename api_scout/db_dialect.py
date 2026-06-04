@@ -25,15 +25,30 @@ doesn't need dialect-aware code at all.
 
 The dialect object is immutable. Callers should obtain one via
 :func:`dialect_for_url`.
+
+Postgres connection behaviour
+-----------------------------
+
+The Postgres connector applies a bounded ``connect_timeout`` (default
+5 seconds, override via ``API_SCOUT_PG_CONNECT_TIMEOUT``) and retries
+the initial connect a few times on failure. This handles the common
+case of the dashboard container starting before its Postgres sidecar
+finishes initialising — without it, the dashboard process exits and
+the orchestrator's restart loop is the only recovery.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
+import time
 from abc import ABC, abstractmethod
 from typing import Any
 from urllib.parse import urlparse
+
+
+_log = logging.getLogger(__name__)
 
 
 # ── Public dialect identifiers ──────────────────────────────────────
@@ -141,6 +156,61 @@ class SQLiteDialect(SQLDialect):
 # ── Postgres implementation ─────────────────────────────────────────
 
 
+class PostgresExtraNotInstalled(RuntimeError):
+    """Raised when a Postgres URL is given but psycopg isn't installed.
+
+    The error message tells the user exactly how to fix it. We raise a
+    dedicated subclass so callers (CLI, dashboard) can pattern-match on
+    it without doing string sniffing.
+    """
+
+    INSTALL_HINT = (
+        "Postgres backend requested but the 'psycopg' driver is not "
+        "installed. Install the optional extra:\n"
+        "    pip install 'api-scout[postgres]'"
+    )
+
+    def __init__(self) -> None:
+        super().__init__(self.INSTALL_HINT)
+
+
+def _import_psycopg():
+    """Import :mod:`psycopg` or raise a friendly :class:`PostgresExtraNotInstalled`."""
+    try:
+        import psycopg  # type: ignore[import-not-found]
+        from psycopg.rows import dict_row  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise PostgresExtraNotInstalled() from exc
+    return psycopg, dict_row
+
+
+# Connect-retry tuning. Override via env so operators can dial it up
+# for slow-to-start managed Postgres without rebuilding the image.
+_PG_CONNECT_TIMEOUT_DEFAULT = 5
+_PG_CONNECT_RETRIES_DEFAULT = 5
+_PG_CONNECT_BACKOFF_BASE = 0.5  # seconds; doubles each attempt
+
+
+def _pg_connect_timeout() -> int:
+    raw = os.environ.get("API_SCOUT_PG_CONNECT_TIMEOUT")
+    if not raw:
+        return _PG_CONNECT_TIMEOUT_DEFAULT
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return _PG_CONNECT_TIMEOUT_DEFAULT
+
+
+def _pg_connect_retries() -> int:
+    raw = os.environ.get("API_SCOUT_PG_CONNECT_RETRIES")
+    if not raw:
+        return _PG_CONNECT_RETRIES_DEFAULT
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return _PG_CONNECT_RETRIES_DEFAULT
+
+
 class PostgresDialect(SQLDialect):
     name = POSTGRES
     ph = "%s"
@@ -157,21 +227,62 @@ class PostgresDialect(SQLDialect):
         return f"to_char(({column})::timestamp, 'YYYY-MM-DD\"T\"HH24:\"00:00\"')"
 
     def integrity_error_type(self) -> type[Exception]:
-        # Lazy import: psycopg is an optional dep.
-        import psycopg  # type: ignore[import-not-found]
-
+        psycopg, _ = _import_psycopg()
         return psycopg.errors.IntegrityError
 
     def connect(self, url: str) -> Any:
-        import psycopg  # type: ignore[import-not-found]
-        from psycopg.rows import dict_row  # type: ignore[import-not-found]
+        """Open a Postgres connection with bounded timeout + retry.
 
-        conn = psycopg.connect(url, row_factory=dict_row)
-        # Match SQLite-ish semantics: transactions are explicit, callers
-        # .commit() or .rollback() as needed. psycopg's default is
-        # already non-autocommit, but we make it explicit.
-        conn.autocommit = False
-        return conn
+        Retries only the *initial* connection. Once we have a
+        working connection, downstream errors (broken connection
+        mid-query, DB restart) propagate to the caller — retrying
+        an individual query is the application's call, not ours.
+        """
+        psycopg, dict_row = _import_psycopg()
+
+        timeout = _pg_connect_timeout()
+        retries = _pg_connect_retries()
+        last_exc: Exception | None = None
+
+        for attempt in range(retries + 1):
+            try:
+                conn = psycopg.connect(
+                    url,
+                    row_factory=dict_row,
+                    connect_timeout=timeout,
+                )
+                # Match SQLite-ish semantics: transactions are explicit,
+                # callers .commit() or .rollback() as needed.
+                conn.autocommit = False
+                if attempt > 0:
+                    _log.info(
+                        "postgres_connected_after_retry",
+                        extra={"attempts": attempt + 1},
+                    )
+                return conn
+            except psycopg.OperationalError as exc:
+                # Operational = network / readiness errors that are
+                # worth retrying. Programming errors (bad URL, auth
+                # failure) surface as different exception classes
+                # and are not retried.
+                last_exc = exc
+                if attempt >= retries:
+                    break
+                delay = _PG_CONNECT_BACKOFF_BASE * (2 ** attempt)
+                _log.warning(
+                    "postgres_connect_retry",
+                    extra={
+                        "attempt": attempt + 1,
+                        "of": retries + 1,
+                        "sleep_seconds": round(delay, 2),
+                        "error": str(exc),
+                    },
+                )
+                time.sleep(delay)
+
+        # Exhausted retries — re-raise the last operational error.
+        assert last_exc is not None
+        raise last_exc
 
     def row_to_dict(self, row: Any) -> dict | None:
         if row is None:

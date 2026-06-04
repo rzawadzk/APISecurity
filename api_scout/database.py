@@ -409,8 +409,14 @@ class Database:
             "top_errors": top_errors,
         }
 
-    def get_traffic_timeline(self, hours: int = 24, bucket_minutes: int = 60) -> list[dict]:
-        """Get request counts bucketed by time (hour granularity)."""
+    def get_traffic_timeline(self, hours: int = 24) -> list[dict]:
+        """Get request counts bucketed by time (hour granularity).
+
+        The bucket size is fixed at one hour because both backends
+        compute it via :meth:`SQLDialect.hour_bucket_sql`. A
+        sub-hour-granularity timeline would need a second dialect
+        helper; until there's a caller for it, the parameter is gone.
+        """
         ph = self._ph
         cutoff = _iso_hours_ago(hours)
         bucket_expr = self.dialect.hour_bucket_sql("timestamp")
@@ -523,6 +529,26 @@ class Database:
             query += f" ORDER BY created_at DESC LIMIT {ph}"
             rows = conn.execute(query, (limit,)).fetchall()
         return [self.dialect.row_to_dict(r) for r in rows]
+
+    def count_open_alerts_by_severity(self) -> dict[str, int]:
+        """Return ``{severity: count}`` for unacknowledged alerts.
+
+        Used by the Prometheus exporter; doing the GROUP BY in SQL keeps
+        ``/metrics`` fast even when the alert table is large (the old
+        code pulled every row into Python).
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT severity, COUNT(*) AS n FROM alerts "
+                "WHERE acknowledged = 0 GROUP BY severity"
+            ).fetchall()
+        out: dict[str, int] = {}
+        for r in rows:
+            d = self.dialect.row_to_dict(r) or {}
+            sev = d.get("severity")
+            if sev:
+                out[sev] = int(d.get("n") or 0)
+        return out
 
     def acknowledge_alert(self, alert_id: int) -> None:
         ph = self._ph

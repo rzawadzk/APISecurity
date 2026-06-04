@@ -13,8 +13,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from . import __version__
 from .database import Database
-from .db_dialect import database_url_from_env
+from .db_dialect import PostgresExtraNotInstalled, database_url_from_env
 from .inventory import APIInventory
 from .models import APIStatus, AuthMethod
 from .parsers import ALBLogParser, APIGatewayLogParser, GenericLogParser, NginxLogParser
@@ -59,7 +60,7 @@ def auto_detect_parser(file_path: Path):
 
 
 @click.group()
-@click.version_option(version="0.1.0", prog_name="api-scout")
+@click.version_option(version=__version__, prog_name="api-scout")
 @click.option(
     "--db",
     "db_path",
@@ -80,7 +81,13 @@ def main(ctx, db_path: str):
 
 
 def get_db(ctx) -> Database:
-    return Database(ctx.obj["db_path"])
+    try:
+        return Database(ctx.obj["db_path"])
+    except PostgresExtraNotInstalled as exc:
+        # The user pointed at Postgres but didn't install the extra.
+        # Print the install hint cleanly rather than dumping a traceback.
+        console.print(f"[red]{exc}[/]")
+        sys.exit(2)
 
 
 @main.command()

@@ -11,3 +11,4 @@ build/
 .coverage
 htmlcov/
 smoke.db*
+.DS_Store
